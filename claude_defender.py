@@ -29,6 +29,7 @@ ARCHITECTURE
   Sprites / Game Objects:
     Terrain          — procedurally generated scrolling mountain landscape.
     Bullet           — player projectile travelling horizontally.
+    ClaudeBullet     — enemy projectile fired by Claude ships at the player.
     Particle         — short-lived explosion fragment.
     SuperZapperEffect— expanding ring + flash visual when zapper fires.
     Human            — ground-level civilian that Claude ships try to abduct.
@@ -445,6 +446,38 @@ class Bullet:
         pygame.draw.circle(surf, WHITE, (int(sx), int(self.y)), 2)
 
 
+class ClaudeBullet:
+    """Enemy projectile fired by Claude ships toward the player."""
+    SPEED = 260
+
+    def __init__(self, world_x: float, y: float, target_wx: float, target_y: float):
+        self.world_x = float(world_x)
+        self.y       = float(y)
+        dx = target_wx - world_x
+        if dx > WORLD_W / 2:  dx -= WORLD_W
+        if dx < -WORLD_W / 2: dx += WORLD_W
+        dy = target_y - y
+        dist = math.hypot(dx, dy) or 1
+        self.vx  = dx / dist * self.SPEED
+        self.vy  = dy / dist * self.SPEED
+        self.age = 0.0
+        self.dead= False
+
+    def update(self, dt: float):
+        self.world_x = (self.world_x + self.vx * dt) % WORLD_W
+        self.y      += self.vy * dt
+        self.age    += dt
+        if self.age > 5.0 or self.y > H + 20 or self.y < PLAY_Y:
+            self.dead = True
+
+    def draw(self, surf: pygame.Surface, camera_x: float):
+        sx = (self.world_x - camera_x) % WORLD_W
+        if sx < -10 or sx > W + 10:
+            return
+        pygame.draw.circle(surf, CLAUDE_O, (int(sx), int(self.y)), 5)
+        pygame.draw.circle(surf, CLAUDE_H, (int(sx), int(self.y)), 3)
+
+
 class Particle:
     def __init__(self, x: float, y: float, color):
         self.x = float(x)
@@ -567,6 +600,8 @@ class ClaudeShip:
     STATE_DIVE  = 'dive'
     STATE_CARRY = 'carry'
 
+    SHOOT_INTERVAL_BASE = 3.5   # seconds between shots (base); decreases with level
+
     def __init__(self, world_x: float, y: float, level: int = 1):
         self.world_x      = float(world_x)
         self.y            = float(y)
@@ -584,30 +619,52 @@ class ClaudeShip:
         self._dive_speed  = 80 + level * 12
         self._carry_speed = 60 + level * 8
         self._dive_chance = 0.003 + level * 0.002
+        # shooting
+        self._shoot_interval = max(1.2, self.SHOOT_INTERVAL_BASE - level * 0.3)
+        self._shoot_timer    = random.uniform(0, self._shoot_interval)
 
-    def update(self, dt: float, humans: list):
+    def update(self, dt: float, humans: list, terrain: "Terrain"):
         self.anim_tick += dt
         if self.anim_tick > 0.25:
             self.anim_tick = 0.0
             self.anim_frame ^= 1
 
         if self.state == self.STATE_HOVER:
-            self._update_hover(dt, humans)
+            self._update_hover(dt, humans, terrain)
         elif self.state == self.STATE_DIVE:
-            self._update_dive(dt)
+            self._update_dive(dt, terrain)
         elif self.state == self.STATE_CARRY:
-            self._update_carry(dt)
+            self._update_carry(dt, terrain)
 
         self.world_x = self.world_x % WORLD_W
 
-    def _update_hover(self, dt: float, humans: list):
+        # tick shoot timer
+        self._shoot_timer += dt
+
+        # clamp above terrain at all times
+        floor_y = terrain.height_at(self.world_x) - self.SIZE // 2 - 2
+        if self.y > floor_y:
+            self.y = floor_y
+
+    def take_shot(self, player: "Player") -> "ClaudeBullet | None":
+        """Return a ClaudeBullet aimed at the player if the shoot timer fired."""
+        if self.state == self.STATE_CARRY:
+            return None
+        if self._shoot_timer < self._shoot_interval:
+            return None
+        self._shoot_timer = 0.0
+        return ClaudeBullet(self.world_x, self.y + self.SIZE // 2,
+                            player.world_x, player.y)
+
+    def _update_hover(self, dt: float, humans: list, terrain: "Terrain"):
         self.hover_phase += dt * 1.8
+        # keep hover base well above terrain at current position
+        floor_y = terrain.height_at(self.world_x) - self.SIZE // 2 - 20
+        self.hover_base_y = max(PLAY_Y + 40,
+                                min(min(PLAY_Y + (GROUND_Y - PLAY_Y) * 0.5, floor_y),
+                                    self.hover_base_y))
         self.y = self.hover_base_y + math.sin(self.hover_phase) * 12
         self.world_x += self.vx_drift * dt
-        # keep hovering in upper play area
-        self.hover_base_y = max(PLAY_Y + 40,
-                                min(PLAY_Y + (GROUND_Y - PLAY_Y) * 0.5,
-                                    self.hover_base_y))
         available = [h for h in humans if not h.abducted and not h.dead and not h.falling]
         if available and random.random() < self._dive_chance:
             self.target_human = random.choice(available)
@@ -615,7 +672,7 @@ class ClaudeShip:
             self.state = self.STATE_DIVE
             sfx.play('abduct')
 
-    def _update_dive(self, dt: float):
+    def _update_dive(self, dt: float, terrain: "Terrain"):
         if self.target_human is None or self.target_human.dead:
             self.state = self.STATE_HOVER
             if self.target_human and not self.target_human.dead:
@@ -629,6 +686,16 @@ class ClaudeShip:
         move = min(abs(dx), 60 * dt)
         self.world_x += math.copysign(move, dx) if dx != 0 else 0
         self.y += self._dive_speed * dt
+        # stop at terrain surface (human stands here)
+        floor_y = terrain.height_at(self.world_x) - self.SIZE // 2 - 2
+        if self.y >= floor_y:
+            self.y = floor_y
+            if self.target_human and not self.target_human.dead:
+                self._grab_human()
+            else:
+                self.state = self.STATE_HOVER
+                self.target_human = None
+            return
         # arrived at human
         if abs(self.y - self.target_human.y) < 12 and abs(dx) < 24:
             self._grab_human()
@@ -640,7 +707,7 @@ class ClaudeShip:
         self.state = self.STATE_CARRY
         self.target_human = None
 
-    def _update_carry(self, dt: float):
+    def _update_carry(self, dt: float, terrain: "Terrain"):
         self.y -= self._carry_speed * dt
         if self.carried_human:
             self.carried_human.world_x = self.world_x
@@ -1045,9 +1112,10 @@ def play_level(level: int, score: int, lives: int, hi: int):
         ey = random.uniform(PLAY_Y + 60, PLAY_Y + (GROUND_Y - PLAY_Y) * 0.45)
         enemies.append(ClaudeShip(wx, ey, level))
 
-    bullets:     list[Bullet]           = []
-    particles:   list[Particle]         = []
-    zap_effects: list[SuperZapperEffect]= []
+    bullets:       list[Bullet]           = []
+    claude_bullets:list[ClaudeBullet]    = []
+    particles:     list[Particle]        = []
+    zap_effects:   list[SuperZapperEffect]= []
 
     spawn_timer  = 0.0
     total_kills  = 0
@@ -1098,6 +1166,8 @@ def play_level(level: int, score: int, lives: int, hi: int):
                                     particles.append(Particle(sx_kill, en.y, CLAUDE_O))
                         shake = min(shake + 1.0, 2.0)
                         zap_effects.append(SuperZapperEffect(W // 2, H // 2))
+                        for cb in claude_bullets:
+                            cb.dead = True
 
         keys = pygame.key.get_pressed()
         if keys[pygame.K_SPACE]:
@@ -1114,7 +1184,10 @@ def play_level(level: int, score: int, lives: int, hi: int):
 
         # ── update enemies (before humans so abduction state is fresh) ──
         for en in enemies:
-            en.update(dt, humans)
+            en.update(dt, humans, terrain)
+            shot = en.take_shot(player)
+            if shot:
+                claude_bullets.append(shot)
         enemies = [en for en in enemies if not en.dead]
 
         # ── update humans ──
@@ -1138,6 +1211,10 @@ def play_level(level: int, score: int, lives: int, hi: int):
         for b in bullets:
             b.update(dt)
         bullets = [b for b in bullets if not b.dead]
+
+        for cb in claude_bullets:
+            cb.update(dt)
+        claude_bullets = [cb for cb in claude_bullets if not cb.dead]
 
         # ── update particles / zap effects ──
         for p in particles:
@@ -1216,6 +1293,53 @@ def play_level(level: int, score: int, lives: int, hi: int):
                         return score, 0, hi, 'dead'
                     break
 
+        # ── player vs terrain (crash into ground) ──
+        terrain_floor = terrain.height_at(player.world_x) - player.SIZE // 2 - 4
+        if player.y >= terrain_floor and player.invincible <= 0:
+            player.lives    -= 1
+            player.invincible= 2.5
+            player.zappers   = Player.MAX_ZAPPERS
+            player.vy        = -120   # bounce away from ground
+            shake = min(shake + 1.0, 2.0)
+            sfx.play('player_die')
+            sx_p = (player.world_x - camera_x) % WORLD_W
+            for _ in range(25):
+                particles.append(Particle(sx_p, player.y, HUMAN_SKIN))
+            for _ in range(15):
+                particles.append(Particle(sx_p, player.y, RED))
+            if player.lives <= 0:
+                for _ in range(3):
+                    screen.fill(RED); pygame.display.flip(); pygame.time.wait(80)
+                    screen.fill(SKY); pygame.display.flip(); pygame.time.wait(80)
+                return score, 0, hi, 'dead'
+
+        # ── claude bullet vs player ──
+        if player.invincible <= 0:
+            for cb in claude_bullets:
+                if cb.dead:
+                    continue
+                dx = cb.world_x - player.world_x
+                if dx > WORLD_W / 2:  dx -= WORLD_W
+                if dx < -WORLD_W / 2: dx += WORLD_W
+                if abs(dx) < player.SIZE // 2 + 4 and abs(cb.y - player.y) < player.SIZE // 2 + 4:
+                    cb.dead = True
+                    player.lives    -= 1
+                    player.invincible= 2.5
+                    player.zappers   = Player.MAX_ZAPPERS
+                    shake = min(shake + 1.0, 2.0)
+                    sfx.play('player_die')
+                    sx_p = (player.world_x - camera_x) % WORLD_W
+                    for _ in range(25):
+                        particles.append(Particle(sx_p, player.y, HUMAN_SKIN))
+                    for _ in range(15):
+                        particles.append(Particle(sx_p, player.y, RED))
+                    if player.lives <= 0:
+                        for _ in range(3):
+                            screen.fill(RED); pygame.display.flip(); pygame.time.wait(80)
+                            screen.fill(SKY); pygame.display.flip(); pygame.time.wait(80)
+                        return score, 0, hi, 'dead'
+                    break
+
         # ── spawn new enemies ──
         spawn_timer += dt
         if (spawn_timer >= params['spawn_interval'] and
@@ -1252,6 +1376,9 @@ def play_level(level: int, score: int, lives: int, hi: int):
 
         for b in bullets:
             b.draw(game_surf, camera_x)
+
+        for cb in claude_bullets:
+            cb.draw(game_surf, camera_x)
 
         player.draw(game_surf, camera_x)
 
