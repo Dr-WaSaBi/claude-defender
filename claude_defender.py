@@ -30,10 +30,12 @@ ARCHITECTURE
     Terrain          — procedurally generated scrolling mountain landscape.
     Bullet           — player projectile travelling horizontally.
     ClaudeBullet     — enemy projectile fired by Claude ships at the player.
+    ClaudeBomb       — slow-falling bomb dropped by a ClaudeBomber; shootable.
     Particle         — short-lived explosion fragment.
     SuperZapperEffect— expanding ring + flash visual when zapper fires.
     Human            — ground-level civilian that Claude ships try to abduct.
     ClaudeShip       — enemy with HOVER → DIVE → CARRY state machine.
+    ClaudeBomber     — heavy bomber that flies across and drops bombs on humans.
     Player           — the player's ship with 4-directional movement.
 
   Screen Functions:
@@ -118,6 +120,9 @@ class SoundEngine:
         self.player_die  = self._player_die_sound()
         self.zap         = self._zap_sound()
         self.level_clear = self._fanfare_sound()
+        self.bomber_alert= self._bomber_alert_sound()
+        self.bomb_drop   = self._bomb_drop_sound()
+        self.bomb_explode= self._bomb_explode_sound()
 
     def _t(self, dur):
         return np.linspace(0, dur, int(self.SR * dur), endpoint=False)
@@ -203,6 +208,35 @@ class SoundEngine:
             s[-fade:] *= np.linspace(1, 0, fade)
             parts.append(s)
         return self._bake(np.concatenate(parts), 0.22)
+
+    def _bomber_alert_sound(self):
+        # two-tone descending siren warning
+        t = self._t(0.6)
+        phase = np.cumsum(np.where(
+            np.arange(len(t)) % int(self.SR * 0.3) < int(self.SR * 0.15),
+            np.full(len(t), 880),
+            np.full(len(t), 660)
+        ) / self.SR * 2 * np.pi)
+        s = np.sign(np.sin(phase))
+        env = np.ones(len(t))
+        env[:int(self.SR * 0.05)] = np.linspace(0, 1, int(self.SR * 0.05))
+        env[-int(self.SR * 0.1):] = np.linspace(1, 0, int(self.SR * 0.1))
+        return self._bake(s * env, 0.28)
+
+    def _bomb_drop_sound(self):
+        # descending whistle
+        t = self._t(0.5)
+        phase = np.cumsum(np.linspace(1200, 200, len(t)) / self.SR * 2 * np.pi)
+        s = np.sin(phase) * np.exp(-t * 0.5)
+        return self._bake(s, 0.22)
+
+    def _bomb_explode_sound(self):
+        t = self._t(0.45)
+        noise = np.random.default_rng(9).uniform(-1, 1, len(t))
+        env   = np.exp(-t * 12)
+        phase = np.cumsum(np.linspace(300, 30, len(t)) / self.SR * 2 * np.pi)
+        tone  = np.sign(np.sin(phase)) * 0.4
+        return self._bake((noise * 0.6 + tone * 0.4) * env, 0.5)
 
     def play(self, name: str):
         getattr(self, name).play()
@@ -335,6 +369,48 @@ def make_human_surf_small(size: int = 16) -> pygame.Surface:
     # legs
     pygame.draw.rect(surf, HUMAN_PANTS, (s // 4, s, s // 5, s // 2))
     pygame.draw.rect(surf, HUMAN_PANTS, (s // 2, s, s // 5, s // 2))
+    return surf
+
+
+def make_claude_bomber_surf(frame: int = 0) -> pygame.Surface:
+    """Wide, heavy Claude bomber with a visible bomb bay and wing pylons."""
+    bw, bh = 64, 36    # body dimensions
+    total_h = bh + 14  # extra for bomb bay below
+    surf = pygame.Surface((bw, total_h), pygame.SRCALPHA)
+
+    # wide fuselage
+    body = pygame.Rect(0, 0, bw, bh)
+    pygame.draw.rect(surf, CLAUDE_O, body, border_radius=bh // 4)
+    pygame.draw.rect(surf, CLAUDE_D, body, width=2, border_radius=bh // 4)
+    # highlight strip
+    hi = pygame.Rect(bw // 6, bh // 8, bw * 2 // 3, bh // 5)
+    pygame.draw.rect(surf, CLAUDE_H, hi, border_radius=4)
+    # eyes (two, close together near center)
+    ey = bh // 3
+    er = 4
+    for ex in (bw // 2 - 10, bw // 2 + 10):
+        pygame.draw.circle(surf, CLAUDE_D, (ex, ey), er)
+        pygame.draw.circle(surf, (255, 165, 50), (ex, ey), er - 2)
+    # mouth
+    mx, my = bw // 2, bh * 2 // 3
+    mw, mh = bw * 2 // 7, bh // 5
+    pygame.draw.arc(surf, CLAUDE_D,
+                    (mx - mw // 2, my - mh // 2, mw, mh),
+                    math.pi * 0.1, math.pi * 0.9, 2)
+    # wing pylons (left and right)
+    for wx in (6, bw - 14):
+        pygame.draw.rect(surf, CLAUDE_D, (wx, bh // 3, 8, bh // 3))
+    # left/right engine nacelles on wingtips
+    for ex in (0, bw - 10):
+        pygame.draw.rect(surf, (50, 55, 70), (ex, bh // 2 - 4, 10, 8), border_radius=3)
+        glow = (255, 160, 40) if frame == 1 else (160, 70, 10)
+        pygame.draw.circle(surf, glow, (ex + 2, bh // 2), 4)
+    # bomb bay door (center underside)
+    bay_x = bw // 2 - 10
+    pygame.draw.rect(surf, CLAUDE_D, (bay_x, bh - 2, 20, 8), border_radius=2)
+    # bomb silhouette visible in bay
+    pygame.draw.ellipse(surf, (60, 60, 60), (bay_x + 4, bh, 12, 7))
+    pygame.draw.circle(surf, (200, 200, 40), (bay_x + 10, bh + 10), 3)  # fuse glow
     return surf
 
 
@@ -749,6 +825,169 @@ class ClaudeShip:
                              (int(hsx), int(hy) - 10), 1)
 
 
+class ClaudeBomb:
+    """Slow-falling bomb dropped by a ClaudeBomber. Shootable by the player."""
+    FALL_SPEED = 85    # px/s downward — slow enough for player to intercept
+    SIZE       = 10    # collision radius
+
+    def __init__(self, world_x: float, y: float, target_human=None):
+        self.world_x      = float(world_x)
+        self.y            = float(y)
+        self.target_human = target_human   # drifts slightly toward target X
+        self.dead         = False
+        self.exploded     = False
+        self.trail: list  = []  # (x, y) screen positions for smoke trail
+        self.trail_timer  = 0.0
+
+    def update(self, dt: float, terrain: "Terrain", humans: list,
+               particles: list, camera_x: float) -> bool:
+        """Returns True if bomb killed a human."""
+        self.y += self.FALL_SPEED * dt
+
+        # gentle horizontal drift toward target human
+        if self.target_human and not self.target_human.dead:
+            dx = self.target_human.world_x - self.world_x
+            if dx > WORLD_W / 2:  dx -= WORLD_W
+            if dx < -WORLD_W / 2: dx += WORLD_W
+            drift = math.copysign(min(abs(dx), 18 * dt), dx) if dx != 0 else 0
+            self.world_x = (self.world_x + drift) % WORLD_W
+
+        # smoke trail
+        self.trail_timer += dt
+        if self.trail_timer > 0.06:
+            self.trail_timer = 0.0
+            sx = (self.world_x - camera_x) % WORLD_W
+            self.trail.append([sx, self.y, 1.0])   # [x, y, alpha]
+        for t in self.trail:
+            t[2] -= dt * 2.5
+        self.trail = [t for t in self.trail if t[2] > 0]
+
+        # check hit human
+        for h in humans:
+            if h.dead or h.abducted:
+                continue
+            dx = self.world_x - h.world_x
+            if dx > WORLD_W / 2:  dx -= WORLD_W
+            if dx < -WORLD_W / 2: dx += WORLD_W
+            if abs(dx) < self.SIZE + 8 and abs(self.y - h.y) < self.SIZE + 14:
+                self._explode(particles, camera_x)
+                h.dead = True
+                sfx.play('human_die')
+                return True
+
+        # check hit terrain
+        if self.y >= terrain.height_at(self.world_x):
+            self._explode(particles, camera_x)
+            return False
+
+        # off bottom of screen
+        if self.y > H + 20:
+            self.dead = True
+        return False
+
+    def _explode(self, particles: list, camera_x: float):
+        self.dead     = True
+        self.exploded = True
+        sfx.play('bomb_explode')
+        sx = (self.world_x - camera_x) % WORLD_W
+        for _ in range(20):
+            particles.append(Particle(sx, self.y, RED))
+        for _ in range(10):
+            particles.append(Particle(sx, self.y, YELLOW))
+
+    def draw(self, surf: pygame.Surface, camera_x: float):
+        # smoke trail
+        for tx, ty, alpha in self.trail:
+            a = int(alpha * 140)
+            c = (a, a, a)
+            pygame.draw.circle(surf, c, (int(tx), int(ty)), 3)
+        sx = (self.world_x - camera_x) % WORLD_W
+        if sx < -20 or sx > W + 20:
+            return
+        # bomb body — dark oval with yellow fuse glow
+        pygame.draw.ellipse(surf, (50, 50, 50), (int(sx) - 6, int(self.y) - 8, 12, 16))
+        pygame.draw.ellipse(surf, CLAUDE_D,    (int(sx) - 6, int(self.y) - 8, 12, 16), 1)
+        # pulsing fuse tip
+        fuse_r = 3 + int(math.sin(self.y * 0.3) * 1.5)
+        pygame.draw.circle(surf, YELLOW, (int(sx), int(self.y) - 10), fuse_r)
+        pygame.draw.circle(surf, WHITE,  (int(sx), int(self.y) - 10), max(1, fuse_r - 2))
+
+
+class ClaudeBomber:
+    """Heavy bomber that flies straight across the world and drops bombs on humans."""
+    WIDTH      = 64
+    HEIGHT     = 36
+    SPEED      = 115        # px/s horizontal
+    BOMB_INTERVAL_MIN = 2.5
+    BOMB_INTERVAL_MAX = 5.0
+    SCORE_VALUE       = 500
+
+    def __init__(self, world_x: float, direction: int, level: int = 1):
+        self.world_x    = float(world_x)
+        self.y          = float(random.uniform(PLAY_Y + 60, PLAY_Y + (GROUND_Y - PLAY_Y) * 0.35))
+        self.direction  = direction   # +1 right, -1 left
+        self.level      = level
+        self.speed      = self.SPEED + level * 8
+        self.dead       = False
+        self.anim_frame = 0
+        self.anim_tick  = 0.0
+        self.bomb_timer = random.uniform(1.0, 2.5)  # first drop delay
+        self.bomb_interval = random.uniform(self.BOMB_INTERVAL_MIN,
+                                            self.BOMB_INTERVAL_MAX)
+        self.surfs      = [make_claude_bomber_surf(f) for f in (0, 1)]
+        self._laps      = 0   # number of times it has wrapped the world
+
+    def update(self, dt: float, humans: list) -> "ClaudeBomb | None":
+        """Returns a ClaudeBomb if one is dropped this frame, else None."""
+        self.anim_tick += dt
+        if self.anim_tick > 0.2:
+            self.anim_tick = 0.0
+            self.anim_frame ^= 1
+
+        prev_x = self.world_x
+        self.world_x = (self.world_x + self.direction * self.speed * dt) % WORLD_W
+
+        # count world laps; retire after 2 full passes
+        if self.direction == 1 and prev_x > self.world_x:
+            self._laps += 1
+        elif self.direction == -1 and prev_x < self.world_x:
+            self._laps += 1
+        if self._laps >= 2:
+            self.dead = True
+            return None
+
+        # bomb drop timer
+        self.bomb_timer += dt
+        if self.bomb_timer >= self.bomb_interval:
+            self.bomb_timer = 0.0
+            self.bomb_interval = random.uniform(self.BOMB_INTERVAL_MIN,
+                                                self.BOMB_INTERVAL_MAX)
+            return self._drop_bomb(humans)
+        return None
+
+    def _drop_bomb(self, humans: list) -> "ClaudeBomb":
+        # target the nearest human below
+        available = [h for h in humans if not h.dead and not h.abducted]
+        target = None
+        if available:
+            # pick closest by world-wrap distance
+            def wrap_dist(h):
+                dx = abs(h.world_x - self.world_x)
+                return min(dx, WORLD_W - dx)
+            target = min(available, key=wrap_dist)
+        sfx.play('bomb_drop')
+        return ClaudeBomb(self.world_x, self.y + self.HEIGHT // 2 + 2, target)
+
+    def draw(self, surf: pygame.Surface, camera_x: float):
+        sx = (self.world_x - camera_x) % WORLD_W
+        if sx < -self.WIDTH or sx > W + self.WIDTH:
+            return
+        s = self.surfs[self.anim_frame]
+        if self.direction == -1:
+            s = pygame.transform.flip(s, True, False)
+        surf.blit(s, (int(sx) - self.WIDTH // 2, int(self.y) - self.HEIGHT // 2))
+
+
 class Player:
     SIZE         = 32
     SPEED_H      = 320
@@ -848,7 +1087,8 @@ def draw_stars(surf: pygame.Surface, camera_x: float):
 # ── radar ──────────────────────────────────────────────────────────────────────
 def draw_radar(surf: pygame.Surface, camera_x: float,
                terrain: Terrain, player: Player,
-               enemies: list, humans: list):
+               enemies: list, humans: list,
+               bombers: list | None = None):
     r = pygame.Rect(0, 0, W, RADAR_H)
     pygame.draw.rect(surf, RADAR_BG, r)
     terrain.draw_radar(surf, r)
@@ -868,6 +1108,12 @@ def draw_radar(surf: pygame.Surface, camera_x: float,
             continue
         hx = int(h.world_x / WORLD_W * W)
         pygame.draw.circle(surf, GREEN, (hx, RADAR_H - 5), 2)
+    # bomber dots — red, larger
+    if bombers:
+        for bomber in bombers:
+            bx = int(bomber.world_x / WORLD_W * W)
+            by = max(3, min(RADAR_H - 4, int(RADAR_H * (bomber.y - PLAY_Y) / (H - PLAY_Y))))
+            pygame.draw.circle(surf, RED, (bx, by), 4)
     # player dot
     px = int(player.world_x / WORLD_W * W)
     pygame.draw.circle(surf, WHITE, (px, RADAR_H // 2), 3)
@@ -1112,13 +1358,17 @@ def play_level(level: int, score: int, lives: int, hi: int):
         ey = random.uniform(PLAY_Y + 60, PLAY_Y + (GROUND_Y - PLAY_Y) * 0.45)
         enemies.append(ClaudeShip(wx, ey, level))
 
-    bullets:       list[Bullet]           = []
-    claude_bullets:list[ClaudeBullet]    = []
-    particles:     list[Particle]        = []
+    bullets:       list[Bullet]            = []
+    claude_bullets:list[ClaudeBullet]     = []
+    bombers:       list[ClaudeBomber]     = []
+    bombs:         list[ClaudeBomb]       = []
+    particles:     list[Particle]         = []
     zap_effects:   list[SuperZapperEffect]= []
 
-    spawn_timer  = 0.0
-    total_kills  = 0
+    spawn_timer   = 0.0
+    total_kills   = 0
+    # bomber spawns after a random kill threshold; resets each time one arrives
+    next_bomber_at = random.randint(5, 12)
     humans_alive = NUM_HUMANS   # tracks humans not yet dead/escaped
     shake        = 0.0
     shake_off    = (0, 0)
@@ -1168,6 +1418,16 @@ def play_level(level: int, score: int, lives: int, hi: int):
                         zap_effects.append(SuperZapperEffect(W // 2, H // 2))
                         for cb in claude_bullets:
                             cb.dead = True
+                        for bomber in bombers:
+                            if not bomber.dead:
+                                sx_bm = (bomber.world_x - camera_x) % WORLD_W
+                                bomber.dead = True
+                                score += ClaudeBomber.SCORE_VALUE
+                                hi = max(hi, score)
+                                for _ in range(20):
+                                    particles.append(Particle(sx_bm, bomber.y, CLAUDE_O))
+                        for bomb in bombs:
+                            bomb.dead = True
 
         keys = pygame.key.get_pressed()
         if keys[pygame.K_SPACE]:
@@ -1215,6 +1475,18 @@ def play_level(level: int, score: int, lives: int, hi: int):
         for cb in claude_bullets:
             cb.update(dt)
         claude_bullets = [cb for cb in claude_bullets if not cb.dead]
+
+        # ── update bombers ──
+        for bomber in bombers:
+            dropped = bomber.update(dt, humans)
+            if dropped:
+                bombs.append(dropped)
+        bombers = [b for b in bombers if not b.dead]
+
+        # ── update bombs ──
+        for bomb in bombs:
+            bomb.update(dt, terrain, humans, particles, camera_x)
+        bombs = [b for b in bombs if not b.dead]
 
         # ── update particles / zap effects ──
         for p in particles:
@@ -1340,6 +1612,82 @@ def play_level(level: int, score: int, lives: int, hi: int):
                         return score, 0, hi, 'dead'
                     break
 
+        # ── bullet vs bomb (player shoots falling bomb) ──
+        for b in bullets:
+            if b.dead:
+                continue
+            for bomb in bombs:
+                if bomb.dead:
+                    continue
+                dx = bomb.world_x - b.world_x
+                if dx > WORLD_W / 2:  dx -= WORLD_W
+                if dx < -WORLD_W / 2: dx += WORLD_W
+                if abs(dx) < bomb.SIZE + 6 and abs(bomb.y - b.y) < bomb.SIZE + 6:
+                    b.dead = True
+                    bomb.dead = True
+                    score += 200
+                    hi = max(hi, score)
+                    sx_b = (bomb.world_x - camera_x) % WORLD_W
+                    for _ in range(14):
+                        particles.append(Particle(sx_b, bomb.y, YELLOW))
+                    for _ in range(6):
+                        particles.append(Particle(sx_b, bomb.y, WHITE))
+                    sfx.play('bomb_explode')
+                    shake = min(shake + 0.2, 1.5)
+                    break
+
+        # ── bullet vs bomber ──
+        for b in bullets:
+            if b.dead:
+                continue
+            for bomber in bombers:
+                if bomber.dead:
+                    continue
+                dx = bomber.world_x - b.world_x
+                if dx > WORLD_W / 2:  dx -= WORLD_W
+                if dx < -WORLD_W / 2: dx += WORLD_W
+                if abs(dx) < bomber.WIDTH // 2 + 4 and abs(bomber.y - b.y) < bomber.HEIGHT // 2 + 4:
+                    b.dead = True
+                    bomber.dead = True
+                    score += ClaudeBomber.SCORE_VALUE
+                    hi = max(hi, score)
+                    sx_bm = (bomber.world_x - camera_x) % WORLD_W
+                    for _ in range(25):
+                        particles.append(Particle(sx_bm, bomber.y, CLAUDE_O))
+                    for _ in range(12):
+                        particles.append(Particle(sx_bm, bomber.y, RED))
+                    shake = min(shake + 0.6, 1.5)
+                    sfx.play('kill')
+                    break
+
+        # ── player vs bomber collision ──
+        if player.invincible <= 0:
+            for bomber in bombers:
+                if bomber.dead:
+                    continue
+                dx = bomber.world_x - player.world_x
+                if dx > WORLD_W / 2:  dx -= WORLD_W
+                if dx < -WORLD_W / 2: dx += WORLD_W
+                if abs(dx) < bomber.WIDTH // 2 + player.SIZE // 2 - 8 and \
+                   abs(bomber.y - player.y) < bomber.HEIGHT // 2 + player.SIZE // 2 - 8:
+                    bomber.dead = True
+                    player.lives    -= 1
+                    player.invincible= 2.5
+                    player.zappers   = Player.MAX_ZAPPERS
+                    shake = min(shake + 1.0, 2.0)
+                    sfx.play('player_die')
+                    sx_p = (player.world_x - camera_x) % WORLD_W
+                    for _ in range(25):
+                        particles.append(Particle(sx_p, player.y, HUMAN_SKIN))
+                    for _ in range(15):
+                        particles.append(Particle(sx_p, player.y, RED))
+                    if player.lives <= 0:
+                        for _ in range(3):
+                            screen.fill(RED); pygame.display.flip(); pygame.time.wait(80)
+                            screen.fill(SKY); pygame.display.flip(); pygame.time.wait(80)
+                        return score, 0, hi, 'dead'
+                    break
+
         # ── spawn new enemies ──
         spawn_timer += dt
         if (spawn_timer >= params['spawn_interval'] and
@@ -1355,6 +1703,15 @@ def play_level(level: int, score: int, lives: int, hi: int):
                     break
             ey = random.uniform(PLAY_Y + 60, PLAY_Y + (GROUND_Y - PLAY_Y) * 0.4)
             enemies.append(ClaudeShip(wx, ey, level))
+
+        # ── spawn bomber when kill threshold reached ──
+        if total_kills >= next_bomber_at and not bombers:
+            direction = random.choice([-1, 1])
+            # enter from the side opposite to its travel direction
+            spawn_wx = (player.world_x + direction * (-W // 2 - 100)) % WORLD_W
+            bombers.append(ClaudeBomber(spawn_wx, direction, level))
+            sfx.play('bomber_alert')
+            next_bomber_at = total_kills + random.randint(8, 16)
 
         # ── termination checks ──
         live_humans = [h for h in humans if not h.dead]
@@ -1374,6 +1731,12 @@ def play_level(level: int, score: int, lives: int, hi: int):
         for en in enemies:
             en.draw(game_surf, camera_x)
 
+        for bomber in bombers:
+            bomber.draw(game_surf, camera_x)
+
+        for bomb in bombs:
+            bomb.draw(game_surf, camera_x)
+
         for b in bullets:
             b.draw(game_surf, camera_x)
 
@@ -1389,7 +1752,7 @@ def play_level(level: int, score: int, lives: int, hi: int):
             z.draw(game_surf)
 
         draw_hud(game_surf, score, player.lives, player.zappers, level, hi)
-        draw_radar(game_surf, camera_x, terrain, player, enemies, humans)
+        draw_radar(game_surf, camera_x, terrain, player, enemies, humans, bombers)
 
         ox, oy = shake_off
         screen.blit(game_surf, (ox, oy))
