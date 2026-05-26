@@ -18,6 +18,57 @@ CONTROLS
     Z or X       Super Zapper — destroys all Claude ships on screen (3 per life)
     ESC          Quit
 
+GAME CONCEPT
+------------
+The player pilots a ship across a horizontally scrolling world defending humans
+on the ground from Claude-branded enemy ships.  Claude ships dive to abduct
+humans and carry them off the top of the screen; losing all humans triggers a
+penalty.  A special Super Zapper (3 uses per life) destroys every enemy on
+screen at once.  Heavier ClaudeBombers periodically cross the world and rain
+bombs on the humans below.  Six levels of increasing difficulty; clearing all
+six wins the game.
+
+COORDINATE SYSTEM
+-----------------
+All game objects live in *world space* — a flat coordinate space
+WORLD_W pixels wide (currently 4500 px, 5× the screen width).  World positions
+wrap with the modulo WORLD_W so the map is seamlessly circular.
+
+    world_x  — horizontal position in world space (0 … WORLD_W).
+    camera_x — the world_x value that maps to the left edge of the screen.
+    screen_x — world_x projected to screen: sx = (world_x - camera_x) % WORLD_W
+
+The camera is always centred on the player, so:
+    camera_x = (player.world_x - W // 2) % WORLD_W
+
+Y is plain screen Y (0 = top, H = bottom), shared between world and screen
+coordinates because the world does not scroll vertically.
+
+UPDATE / DRAW PATTERN
+---------------------
+Every frame, play_level() calls .update(dt) on all live objects, filters out
+any whose .dead flag is True, then calls .draw(surf, camera_x) on survivors.
+The dt (seconds since last frame) is capped at 0.05 s to prevent physics
+explosions on slow frames.  Screen-shake is handled by blitting the off-screen
+game_surf to the display surface with a random pixel offset.
+
+SOUND SYSTEM
+------------
+SoundEngine synthesises every sound effect at startup from numpy waveforms
+(square waves, sine sweeps, shaped noise bursts).  No audio files are needed.
+A module-level mutable list _sound_on = [True] acts as a globally accessible
+mute toggle; any scope can flip _sound_on[0] without a ``global`` declaration.
+sfx.play(name) is a no-op when _sound_on[0] is False.
+
+LEVEL PROGRESSION
+-----------------
+level_params(level) returns a dict controlling enemy count, spawn rate, kill
+quota, and per-kill score multipliers for a given level number (1-based).
+Each stat scales with level so later levels are harder and more rewarding.
+Clearing all 6 levels triggers the win condition; losing all lives or letting
+all humans die ends the run.  Between levels the player keeps lives and score;
+a per-life bonus is awarded on level clear.
+
 ARCHITECTURE
 ------------
   Sound:
@@ -60,58 +111,81 @@ pygame.mixer.pre_init(44100, -16, 2, 512)
 pygame.init()
 
 # ── screen ─────────────────────────────────────────────────────────────────────
-W, H     = 900, 700
-WORLD_W  = 4500          # 5× screen width; world wraps
-RADAR_H  = 44            # mini-map strip height
-HUD_H    = 52            # score/lives bar below radar
-PLAY_Y   = RADAR_H + HUD_H   # top of actual play area (84px)
-GROUND_Y = H - 60        # terrain baseline
-FPS      = 60
+W, H     = 900, 700      # screen dimensions in pixels (width × height)
+WORLD_W  = 4500          # total scrollable world width; 5× screen, wraps at edges
+RADAR_H  = 44            # height of the mini-map strip at the very top of the screen
+HUD_H    = 52            # height of the score/lives bar directly below the radar
+PLAY_Y   = RADAR_H + HUD_H   # top of the playable area (96 px below screen top)
+GROUND_Y = H - 60        # Y coordinate of the terrain baseline (not the terrain itself)
+FPS      = 60            # target frames per second for the game loop
 
 screen = pygame.display.set_mode((W, H))
 pygame.display.set_caption("Claude Defender")
 clock  = pygame.time.Clock()
 
 # ── palette ────────────────────────────────────────────────────────────────────
-BLACK      = (  0,   0,   0)
-SKY        = (  8,   8,  28)
-WHITE      = (255, 255, 255)
-CLAUDE_O   = (210, 140,  65)
-CLAUDE_D   = (130,  78,  18)
-CLAUDE_H   = (240, 175, 105)
-GROUND_C   = ( 28,  55,  38)
-RIDGE_C    = ( 55, 110,  60)
-HUMAN_SKIN = (255, 205, 155)
-HUMAN_SHIRT= ( 55, 120, 190)
-HUMAN_PANTS= ( 30,  50, 100)
-BULLET_C   = (255, 255, 100)
-RADAR_BG   = ( 10,  10,  25)
-RADAR_RIDG = ( 30,  55,  35)
-STAR_C     = (200, 210, 255)
-RED        = (220,  40,  40)
-YELLOW     = (255, 220,   0)
-ZAP_C      = (255, 240, 180)
-GRAY       = (128, 128, 128)
-MX_GRN     = (  0, 230,  80)
-GREEN      = (  0, 220,  80)
+BLACK      = (  0,   0,   0)  # pure black; not used directly as sky (too flat)
+SKY        = (  8,   8,  28)  # very dark navy — the background sky colour
+WHITE      = (255, 255, 255)  # pure white; used for bullet cores, player dot, etc.
+CLAUDE_O   = (210, 140,  65)  # Claude brand orange; enemy ship primary fill
+CLAUDE_D   = (130,  78,  18)  # dark orange-brown; enemy ship borders/detail
+CLAUDE_H   = (240, 175, 105)  # highlight orange; shine strip on enemy ship
+GROUND_C   = ( 28,  55,  38)  # dark green; terrain polygon fill
+RIDGE_C    = ( 55, 110,  60)  # lighter green; terrain ridge outline
+HUMAN_SKIN = (255, 205, 155)  # peach; human character skin / helmet
+HUMAN_SHIRT= ( 55, 120, 190)  # blue; human torso suit colour
+HUMAN_PANTS= ( 30,  50, 100)  # dark blue; human leg colour
+BULLET_C   = (255, 255, 100)  # bright yellow; player bullet body
+RADAR_BG   = ( 10,  10,  25)  # near-black navy; radar strip background
+RADAR_RIDG = ( 30,  55,  35)  # dark green; terrain silhouette on the radar
+STAR_C     = (200, 210, 255)  # pale blue-white; star dot base colour (tinted by brightness)
+RED        = (220,  40,  40)  # red; explosions, game-over flash
+YELLOW     = (255, 220,   0)  # gold-yellow; HUD highlights, level-clear text
+ZAP_C      = (255, 240, 180)  # warm white; Super Zapper ring/flash colour
+GRAY       = (128, 128, 128)  # mid-grey; inactive UI elements
+MX_GRN     = (  0, 230,  80)  # bright matrix green; level indicator, sound-on button
+GREEN      = (  0, 220,  80)  # particle/rescue green; human radar dots
 
 # ── fonts ──────────────────────────────────────────────────────────────────────
-font_big   = pygame.font.SysFont("monospace", 48, bold=True)
-font_med   = pygame.font.SysFont("monospace", 26, bold=True)
-font_small = pygame.font.SysFont("monospace", 16)
+font_big   = pygame.font.SysFont("monospace", 48, bold=True)   # titles, level-clear banners
+font_med   = pygame.font.SysFont("monospace", 26, bold=True)   # HUD score text, sub-headers
+font_small = pygame.font.SysFont("monospace", 16)              # high-score table, small labels
 
 # ── world constants ────────────────────────────────────────────────────────────
-MAX_BULLETS  = 4
-BULLET_AGE   = 3.0       # seconds before a bullet expires
-SAMPLE_STEP  = 5         # terrain height sample spacing (world px)
-NUM_HUMANS   = 10
-ZAP_DURATION = 0.7
+MAX_BULLETS  = 4          # maximum player bullets allowed on screen simultaneously
+BULLET_AGE   = 3.0        # seconds before a missed bullet expires and is removed
+SAMPLE_STEP  = 5          # world-pixel spacing between adjacent terrain height samples
+NUM_HUMANS   = 10         # number of civilians spawned at the start of each level
+ZAP_DURATION = 0.7        # seconds the Super Zapper visual effect lasts
 
 # ── sound engine ───────────────────────────────────────────────────────────────
 class SoundEngine:
+    """Synthesises every sound effect from numpy waveforms at startup.
+
+    No audio files are required.  All sounds are built as pygame.Sound objects
+    using numpy arrays that are converted to 16-bit stereo PCM via
+    pygame.sndarray.make_sound.  The class exposes one public method, play(),
+    which respects the global _sound_on mute flag.
+
+    Attributes:
+        SR: Sample rate in Hz (44100).  Matches the pygame mixer pre-init.
+        shoot: Short rising-frequency sweep fired when the player shoots.
+        kill: Noise-burst + descending tone played on an enemy kill.
+        abduct: Rising sine sweep played when a Claude ship grabs a human.
+        rescue: Three-note ascending chime played when the player catches a
+            falling human.
+        human_die: Descending noise burst played when a human hits the ground.
+        player_die: Long descending noise burst played on player death.
+        zap: Heavy noise + descending tone for Super Zapper activation.
+        level_clear: Four-note ascending fanfare for level completion.
+        bomber_alert: Two-tone alternating siren warning when a bomber spawns.
+        bomb_drop: Descending whistle played when a bomb is released.
+        bomb_explode: Short noise burst played when a bomb explodes.
+    """
     SR = 44100
 
     def __init__(self):
+        """Build all Sound objects by synthesising numpy waveforms."""
         self.shoot       = self._sweep(180, 620, 0.05, 'square', 0.16)
         self.kill        = self._kill_sound()
         self.abduct      = self._abduct_sound()
@@ -125,15 +199,43 @@ class SoundEngine:
         self.bomb_explode= self._bomb_explode_sound()
 
     def _t(self, dur):
+        """Return a time array from 0 to dur with SR*dur samples.
+
+        Args:
+            dur: Duration in seconds.
+
+        Returns:
+            1-D numpy float64 array of sample time points.
+        """
         return np.linspace(0, dur, int(self.SR * dur), endpoint=False)
 
     def _bake(self, arr, vol=0.3):
+        """Clip, scale, and convert a float waveform array to a pygame Sound.
+
+        Args:
+            arr: 1-D float numpy array normalised roughly to [-1, 1].
+            vol: Master volume scale applied before clipping (0–1).
+
+        Returns:
+            pygame.Sound object with stereo (2-channel) 16-bit PCM data.
+        """
         arr = np.clip(arr * vol, -1.0, 1.0)
         s16 = (arr * 32767).astype(np.int16)
         return pygame.sndarray.make_sound(
             np.ascontiguousarray(np.column_stack([s16, s16])))
 
     def _tone(self, freq, dur, wave='square', vol=0.3):
+        """Generate a constant-frequency tone with a short fade-out tail.
+
+        Args:
+            freq: Frequency in Hz.
+            dur:  Duration in seconds.
+            wave: 'square' or 'sine'.
+            vol:  Volume scalar passed to _bake.
+
+        Returns:
+            pygame.Sound of the rendered tone.
+        """
         t = self._t(dur)
         s = np.sign(np.sin(2 * np.pi * freq * t)) if wave == 'square' \
             else np.sin(2 * np.pi * freq * t)
@@ -142,6 +244,21 @@ class SoundEngine:
         return self._bake(s, vol)
 
     def _sweep(self, f0, f1, dur, wave='square', vol=0.2):
+        """Generate a frequency sweep from f0 to f1 with a short fade tail.
+
+        Uses cumulative phase integration so the instantaneous frequency
+        transitions smoothly from f0 to f1 over the duration.
+
+        Args:
+            f0:   Start frequency in Hz.
+            f1:   End frequency in Hz.
+            dur:  Duration in seconds.
+            wave: 'square' or 'sine'.
+            vol:  Volume scalar passed to _bake.
+
+        Returns:
+            pygame.Sound of the rendered sweep.
+        """
         t = self._t(dur)
         phase = np.cumsum(np.linspace(f0, f1, len(t)) / self.SR * 2 * np.pi)
         s = np.sign(np.sin(phase)) if wave == 'square' else np.sin(phase)
@@ -150,6 +267,11 @@ class SoundEngine:
         return self._bake(s, vol)
 
     def _kill_sound(self):
+        """Build the enemy-kill sound: shaped noise burst + descending tone.
+
+        Returns:
+            pygame.Sound for enemy destruction.
+        """
         t = self._t(0.28)
         noise = np.random.default_rng(0).uniform(-1, 1, len(t))
         env   = np.exp(-t * 18)
@@ -158,12 +280,22 @@ class SoundEngine:
         return self._bake((noise * 0.5 + tone * 0.5) * env, 0.38)
 
     def _abduct_sound(self):
+        """Build the abduction sound: rising sine sweep with exponential decay.
+
+        Returns:
+            pygame.Sound played when a Claude ship grabs a human.
+        """
         t = self._t(0.4)
         phase = np.cumsum(np.linspace(220, 880, len(t)) / self.SR * 2 * np.pi)
         s = np.sin(phase) * np.exp(-t * 1.5)
         return self._bake(s, 0.28)
 
     def _rescue_sound(self):
+        """Build the rescue chime: three ascending sine tones concatenated.
+
+        Returns:
+            pygame.Sound played when the player catches a falling human.
+        """
         notes, dur = [523, 659, 784], 0.08
         parts = []
         for freq in notes:
@@ -175,6 +307,11 @@ class SoundEngine:
         return self._bake(np.concatenate(parts), 0.25)
 
     def _human_die_sound(self):
+        """Build the human-death sound: descending noise burst.
+
+        Returns:
+            pygame.Sound played when a human hits the ground after falling.
+        """
         t = self._t(0.35)
         noise = np.random.default_rng(5).uniform(-1, 1, len(t))
         env   = np.exp(-t * 9)
@@ -183,6 +320,11 @@ class SoundEngine:
         return self._bake((noise * 0.6 + tone * 0.4) * env, 0.35)
 
     def _player_die_sound(self):
+        """Build the player-death sound: long descending noise + tone blend.
+
+        Returns:
+            pygame.Sound played on player death (1 second duration).
+        """
         t = self._t(1.0)
         noise = np.random.default_rng(2).uniform(-1, 1, len(t))
         env   = np.exp(-t * 4)
@@ -191,6 +333,11 @@ class SoundEngine:
         return self._bake((noise * 0.5 + tone * 0.5) * env, 0.6)
 
     def _zap_sound(self):
+        """Build the Super Zapper sound: heavy noise + descending square tone.
+
+        Returns:
+            pygame.Sound played when the Super Zapper fires.
+        """
         t = self._t(0.6)
         noise = np.random.default_rng(3).uniform(-1, 1, len(t))
         env   = np.exp(-t * 5)
@@ -199,6 +346,11 @@ class SoundEngine:
         return self._bake((noise * 0.7 + tone * 0.3) * env, 0.7)
 
     def _fanfare_sound(self):
+        """Build the level-clear fanfare: four ascending square tones concatenated.
+
+        Returns:
+            pygame.Sound played when a level is cleared.
+        """
         notes, dur = [262, 330, 392, 523], 0.11
         parts = []
         for freq in notes:
@@ -210,6 +362,11 @@ class SoundEngine:
         return self._bake(np.concatenate(parts), 0.22)
 
     def _bomber_alert_sound(self):
+        """Build the bomber-alert siren: alternating two-tone square wave.
+
+        Returns:
+            pygame.Sound played when a ClaudeBomber enters the world.
+        """
         # two-tone descending siren warning
         t = self._t(0.6)
         phase = np.cumsum(np.where(
@@ -224,6 +381,11 @@ class SoundEngine:
         return self._bake(s * env, 0.28)
 
     def _bomb_drop_sound(self):
+        """Build the bomb-drop sound: descending sine whistle.
+
+        Returns:
+            pygame.Sound played when a ClaudeBomber releases a bomb.
+        """
         # descending whistle
         t = self._t(0.5)
         phase = np.cumsum(np.linspace(1200, 200, len(t)) / self.SR * 2 * np.pi)
@@ -231,6 +393,11 @@ class SoundEngine:
         return self._bake(s, 0.22)
 
     def _bomb_explode_sound(self):
+        """Build the bomb-explosion sound: short noise burst + square tone.
+
+        Returns:
+            pygame.Sound played when a ClaudeBomb explodes.
+        """
         t = self._t(0.45)
         noise = np.random.default_rng(9).uniform(-1, 1, len(t))
         env   = np.exp(-t * 12)
@@ -239,6 +406,12 @@ class SoundEngine:
         return self._bake((noise * 0.6 + tone * 0.4) * env, 0.5)
 
     def play(self, name: str):
+        """Play a named sound effect, respecting the global mute flag.
+
+        Args:
+            name: Attribute name of the sound to play (e.g. 'shoot', 'kill').
+                  Silently does nothing if _sound_on[0] is False.
+        """
         if _sound_on[0]:
             getattr(self, name).play()
 
@@ -250,14 +423,27 @@ sfx = SoundEngine()
 
 # ── high scores ────────────────────────────────────────────────────────────────
 class HighScoreManager:
+    """Manages the top-10 high-score table, backed by a JSON file on disk.
+
+    Scores are stored as a list of dicts: [{"name": "AAA", "score": 12345}, ...].
+    The list is always kept sorted descending by score and trimmed to MAX entries.
+    On load failure (missing or corrupt file) an empty table is used silently.
+
+    Attributes:
+        MAX:    Maximum number of entries kept in the table (class-level constant).
+        FILE:   Path to the JSON persistence file, beside the script.
+        scores: In-memory list of score dicts, sorted descending.
+    """
     MAX  = 10
     FILE = Path(__file__).parent / "highscores.json"
 
     def __init__(self):
+        """Initialise an empty scores list and attempt to load from disk."""
         self.scores: list[dict] = []
         self._load()
 
     def _load(self):
+        """Load and sort scores from FILE; silently use empty list on any error."""
         try:
             data = json.loads(self.FILE.read_text())
             self.scores = sorted(data, key=lambda x: x["score"], reverse=True)[:self.MAX]
@@ -265,9 +451,21 @@ class HighScoreManager:
             self.scores = []
 
     def _save(self):
+        """Serialise the current scores list to FILE as formatted JSON."""
         self.FILE.write_text(json.dumps(self.scores, indent=2))
 
     def is_qualifying(self, score: int) -> bool:
+        """Return True if score is good enough to enter the high-score table.
+
+        A score of 0 or less is never qualifying.  A non-zero score qualifies
+        when there is still room in the table or it beats the lowest entry.
+
+        Args:
+            score: The candidate score to test.
+
+        Returns:
+            True if the score belongs in the table, False otherwise.
+        """
         if score <= 0:
             return False
         if len(self.scores) < self.MAX:
@@ -275,18 +473,41 @@ class HighScoreManager:
         return score > self.scores[-1]["score"]
 
     def rank(self, score: int) -> int:
+        """Return the 1-based rank a new score would occupy in the table.
+
+        Scans from the top; the first existing entry the new score matches or
+        beats determines the rank.  If the score is lower than all entries, the
+        rank returned is len(scores) + 1.
+
+        Args:
+            score: The candidate score to rank.
+
+        Returns:
+            Integer rank (1 = best).
+        """
         for i, entry in enumerate(self.scores):
             if score >= entry["score"]:
                 return i + 1
         return len(self.scores) + 1
 
     def add(self, name: str, score: int):
+        """Insert a new entry, re-sort, trim to MAX, and persist to disk.
+
+        Args:
+            name:  Player initials (up to 3 characters; forced to uppercase).
+            score: The score to record.
+        """
         self.scores.append({"name": name.upper()[:3].ljust(3), "score": score})
         self.scores.sort(key=lambda x: x["score"], reverse=True)
         self.scores = self.scores[:self.MAX]
         self._save()
 
     def top_score(self) -> int:
+        """Return the highest recorded score, or 0 if the table is empty.
+
+        Returns:
+            Integer high score.
+        """
         return self.scores[0]["score"] if self.scores else 0
 
 
@@ -420,16 +641,56 @@ def make_claude_bomber_surf(frame: int = 0) -> pygame.Surface:
 
 # ── terrain ────────────────────────────────────────────────────────────────────
 class Terrain:
+    """Procedurally generated, seamlessly wrapping mountain landscape.
+
+    The terrain is represented as a list of Y heights sampled at regular
+    intervals (SAMPLE_STEP world pixels apart).  draw() reconstructs the
+    visible polygon each frame by sampling height_at() across the screen
+    width.  The last BLEND_ZONE pixels blend back toward the first height
+    sample so the terrain wraps without a visible seam.
+
+    A radar surface (build_radar_surf) is pre-baked once per level and
+    blitted cheaply onto the radar strip each frame.
+
+    Attributes:
+        SAMPLE_STEP: World-pixel spacing between height samples (class constant).
+        BLEND_ZONE:  Width of the wrap-blending region in world pixels.
+        world_w:     Total world width in pixels.
+        heights:     List of sampled Y screen positions (terrain surface Y values).
+        _radar_surf: Cached pygame.Surface of the terrain silhouette for radar,
+                     or None before build_radar_surf() is called.
+    """
     SAMPLE_STEP = SAMPLE_STEP
     BLEND_ZONE  = 300   # px; terrain wraps smoothly over this distance
 
     def __init__(self, world_w: int, seed: int = 42):
+        """Generate height samples for a world of width world_w.
+
+        Args:
+            world_w: Total world width in pixels.
+            seed:    Random seed controlling the terrain shape; each level
+                     uses a different seed so terrain varies per level.
+        """
         self.world_w = world_w
         n = world_w // self.SAMPLE_STEP + 2
         self.heights = self._generate(n, seed)
         self._radar_surf: pygame.Surface | None = None
 
     def _generate(self, n: int, seed: int) -> list:
+        """Compute n terrain height samples using layered sine waves.
+
+        Four sinusoidal octaves with seeded random phases are summed to create
+        varied terrain.  The final BLEND_ZONE pixels are linearly blended back
+        toward the first sample so the world wraps without a height discontinuity.
+        Heights are clamped so the terrain stays within the playable band.
+
+        Args:
+            n:    Number of height samples to produce.
+            seed: Random seed for phase offsets.
+
+        Returns:
+            List of n float Y values (screen coordinates; larger = lower).
+        """
         rng    = random.Random(seed)
         phases = [rng.uniform(0, math.tau) for _ in range(4)]
         amps   = [90, 45, 20, 8]
@@ -459,6 +720,18 @@ class Terrain:
         return [max(lo, min(hi, y)) for y in raw]
 
     def height_at(self, world_x: float) -> float:
+        """Return the interpolated terrain Y position at any world X coordinate.
+
+        Uses linear interpolation between adjacent height samples.  Wraps
+        automatically via modulo so negative or out-of-range world_x values work.
+
+        Args:
+            world_x: Horizontal world position in pixels (any value; wraps).
+
+        Returns:
+            Screen Y coordinate of the terrain surface at that world position.
+            Higher Y values are lower on screen (closer to the ground).
+        """
         wx  = world_x % self.world_w
         idx = wx / self.SAMPLE_STEP
         lo  = int(idx) % len(self.heights)
@@ -467,6 +740,15 @@ class Terrain:
         return self.heights[lo] * (1 - frac) + self.heights[hi] * frac
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the filled terrain polygon and ridge outline onto surf.
+
+        Samples height_at() at every SAMPLE_STEP screen pixel to build a
+        polygon that covers the bottom of the screen.
+
+        Args:
+            surf:     Destination surface (the game surface, not the display).
+            camera_x: World X coordinate of the left edge of the screen.
+        """
         pts = [(0, H)]
         for sx in range(0, W + self.SAMPLE_STEP, self.SAMPLE_STEP):
             wx = (sx + camera_x) % self.world_w
@@ -495,15 +777,47 @@ class Terrain:
         self._radar_surf = s
 
     def draw_radar(self, surf: pygame.Surface, radar_rect: pygame.Rect):
+        """Blit the pre-baked radar terrain silhouette onto surf.
+
+        Does nothing if build_radar_surf() has not yet been called.
+
+        Args:
+            surf:       Destination surface (the game surface).
+            radar_rect: Rectangle defining the radar strip on the surface.
+        """
         if self._radar_surf:
             surf.blit(self._radar_surf, radar_rect.topleft)
 
 
 # ── game objects ───────────────────────────────────────────────────────────────
 class Bullet:
+    """Player projectile that travels horizontally in the direction the ship faces.
+
+    Bullets live in world coordinates and wrap with the world.  A maximum of
+    MAX_BULLETS may exist on screen at once.  Each bullet expires after
+    BULLET_AGE seconds so missed shots don't loop forever.
+
+    Attributes:
+        SPEED:     Bullet speed in pixels per second (class constant).
+        world_x:   Horizontal position in world space (0 to WORLD_W).
+        y:         Vertical screen position in pixels.
+        vx:        Horizontal velocity (+ve = right, -ve = left) in px/s.
+        direction: +1 (right) or -1 (left); used to draw the bullet tip on
+                   the correct end.
+        age:       Seconds this bullet has been alive; dies at BULLET_AGE.
+        dead:      Set True when the bullet should be removed from the list.
+    """
     SPEED = 700
 
     def __init__(self, world_x: float, y: float, direction: int):
+        """Spawn a bullet at world_x/y travelling in direction.
+
+        Args:
+            world_x:   Starting world X position (typically just ahead of the
+                       player's nose).
+            y:         Screen Y position (inherits from the player's centre).
+            direction: +1 for right, -1 for left.
+        """
         self.world_x   = float(world_x)
         self.y         = float(y)
         self.vx        = direction * self.SPEED
@@ -512,12 +826,25 @@ class Bullet:
         self.dead      = False
 
     def update(self, dt: float):
+        """Advance the bullet's position and age; mark dead if age exceeds limit.
+
+        Args:
+            dt: Elapsed seconds since the last frame.
+        """
         self.world_x = (self.world_x + self.vx * dt) % WORLD_W
         self.age    += dt
         if self.age > BULLET_AGE:
             self.dead = True
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the bullet as a short horizontal line with a bright tip.
+
+        Culls bullets that are off screen.
+
+        Args:
+            surf:     Destination surface.
+            camera_x: World X of the left screen edge.
+        """
         sx = (self.world_x - camera_x) % WORLD_W
         if sx < -20 or sx > W + 20:
             return
@@ -531,6 +858,17 @@ class ClaudeBullet:
     SPEED = 260
 
     def __init__(self, world_x: float, y: float, target_wx: float, target_y: float):
+        """Spawn an enemy bullet aimed from (world_x, y) toward (target_wx, target_y).
+
+        Velocity is computed using wrap-aware shortest-path delta so the bullet
+        always travels the short way around the world.
+
+        Args:
+            world_x:   Firing position in world X.
+            y:         Firing position in screen Y.
+            target_wx: Player's world X at time of fire.
+            target_y:  Player's screen Y at time of fire.
+        """
         self.world_x = float(world_x)
         self.y       = float(y)
         dx = target_wx - world_x
@@ -544,6 +882,11 @@ class ClaudeBullet:
         self.dead= False
 
     def update(self, dt: float):
+        """Move the bullet and expire it after 5 s or when it leaves the play area.
+
+        Args:
+            dt: Elapsed seconds since the last frame.
+        """
         self.world_x = (self.world_x + self.vx * dt) % WORLD_W
         self.y      += self.vy * dt
         self.age    += dt
@@ -551,6 +894,12 @@ class ClaudeBullet:
             self.dead = True
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the enemy bullet as a two-circle orange dot.
+
+        Args:
+            surf:     Destination surface.
+            camera_x: World X of the left screen edge.
+        """
         sx = (self.world_x - camera_x) % WORLD_W
         if sx < -10 or sx > W + 10:
             return
@@ -559,7 +908,33 @@ class ClaudeBullet:
 
 
 class Particle:
+    """Short-lived explosion fragment drawn as a fading coloured circle.
+
+    Particles are created in bursts when enemies or bombs are destroyed and
+    when the player dies.  They travel in random directions with downward
+    gravity and fade out as their life approaches zero.  Particles use screen
+    coordinates (not world coordinates) because they are spawned from a
+    screen-space position and don't need to follow the camera.
+
+    Attributes:
+        x:        Screen X position in pixels.
+        y:        Screen Y position in pixels.
+        vx:       Horizontal velocity in px/s.
+        vy:       Vertical velocity in px/s (positive = downward).
+        life:     Remaining lifetime in seconds.
+        max_life: Initial lifetime; used to compute the fade alpha ratio.
+        color:    Base RGB tuple; multiplied by the fade fraction each frame.
+        r:        Radius of the circle in pixels.
+    """
+
     def __init__(self, x: float, y: float, color):
+        """Spawn a particle at screen position (x, y) with a random direction.
+
+        Args:
+            x:     Screen X spawn position.
+            y:     Screen Y spawn position.
+            color: Base RGB tuple; used as the fully-opaque colour.
+        """
         self.x = float(x)
         self.y = float(y)
         angle  = random.uniform(0, math.tau)
@@ -572,12 +947,22 @@ class Particle:
         self.r        = random.randint(2, 5)
 
     def update(self, dt: float):
+        """Move the particle and apply gravity; decrement remaining life.
+
+        Args:
+            dt: Elapsed seconds since the last frame.
+        """
         self.x   += self.vx * dt
         self.y   += self.vy * dt
-        self.vy  += 200 * dt
+        self.vy  += 200 * dt   # gravity
         self.life -= dt
 
     def draw(self, surf: pygame.Surface):
+        """Draw the particle as a fading circle scaled to remaining life fraction.
+
+        Args:
+            surf: Destination surface (game surface in screen coordinates).
+        """
         alpha = max(0.0, self.life / self.max_life)
         r, g, b = self.color
         col = (int(r * alpha), int(g * alpha), int(b * alpha))
@@ -585,18 +970,47 @@ class Particle:
 
 
 class SuperZapperEffect:
+    """Expanding ring and full-screen flash visual for the Super Zapper weapon.
+
+    Plays for ZAP_DURATION seconds then marks itself dead.  Two concentric
+    expanding rings (outer warm-white, inner pure white) radiate outward from
+    the screen centre.  A brief full-screen alpha flash fires at the start.
+
+    Attributes:
+        cx:   Screen X centre of the effect (usually screen centre).
+        cy:   Screen Y centre of the effect (usually screen centre).
+        t:    Elapsed time in seconds since the effect was triggered.
+        dead: Set True when t reaches ZAP_DURATION so the effect is removed.
+    """
+
     def __init__(self, cx: float, cy: float):
+        """Create the effect centred at screen position (cx, cy).
+
+        Args:
+            cx: Screen X coordinate of the effect origin.
+            cy: Screen Y coordinate of the effect origin.
+        """
         self.cx   = cx
         self.cy   = cy
         self.t    = 0.0
         self.dead = False
 
     def update(self, dt: float):
+        """Advance the animation timer; mark dead when duration is reached.
+
+        Args:
+            dt: Elapsed seconds since the last frame.
+        """
         self.t += dt
         if self.t >= ZAP_DURATION:
             self.dead = True
 
     def draw(self, surf: pygame.Surface):
+        """Draw the expanding rings and optional flash onto surf.
+
+        Args:
+            surf: Destination surface (the game surface).
+        """
         progress = self.t / ZAP_DURATION
         # full-screen flash at start
         if progress < 0.15:
@@ -621,9 +1035,41 @@ class SuperZapperEffect:
 
 
 class Human:
+    """Ground-level civilian that Claude ships attempt to abduct.
+
+    Humans stand on the terrain surface and sway gently when idle.  A
+    ClaudeShip can enter DIVE state to grab a human (setting abducted=True),
+    then carry it upward (STATE_CARRY).  If the carrying ship is destroyed
+    before it escapes, the human enters a falling state and the player can
+    catch it mid-air for bonus points.  If the falling human hits the ground
+    it dies.  If a human is carried above the top of the screen by the ship,
+    it is marked dead and the ship is also removed (escaped).
+
+    Humans lose their position management to their carrier while abducted=True
+    and not falling; their world_x/y are updated by ClaudeShip._update_carry.
+
+    Attributes:
+        SIZE:     Sprite width in pixels (class constant; used as collision radius).
+        world_x:  Horizontal world position.
+        y:        Screen Y position (top of the sprite feet area).
+        abducted: True while a ClaudeShip has targeted or is carrying this human.
+        carrier:  Reference to the ClaudeShip currently holding this human,
+                  or None.
+        falling:  True when the human has been dropped and is falling freely.
+        vy:       Vertical velocity while falling (px/s, positive = downward).
+        dead:     Set True when the human is removed from the game.
+        sway:     Phase offset for the idle sway animation.
+        surf:     Pre-rendered sprite surface.
+    """
     SIZE = 16
 
     def __init__(self, world_x: float, terrain: Terrain):
+        """Place a human on the terrain at the given world X position.
+
+        Args:
+            world_x: Horizontal world position where the human spawns.
+            terrain: Terrain object used to query the ground height at spawn.
+        """
         self.world_x  = float(world_x)
         self.y        = terrain.height_at(world_x) - 14
         self.abducted = False
@@ -667,6 +1113,12 @@ class Human:
         return False
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the human sprite with a gentle sway offset; cull if off screen.
+
+        Args:
+            surf:     Destination surface.
+            camera_x: World X of the left screen edge.
+        """
         sx = (self.world_x - camera_x) % WORLD_W
         if sx < -self.SIZE or sx > W + self.SIZE:
             return
@@ -675,6 +1127,39 @@ class Human:
 
 
 class ClaudeShip:
+    """Enemy fighter ship with a three-state abduction behaviour.
+
+    ClaudeShips cycle through three states:
+    - HOVER: Drift horizontally above the terrain, bobbing vertically.
+      Randomly select a human target and transition to DIVE.
+    - DIVE: Descend rapidly toward the target human, homing in on their world X.
+      Grab the human on contact (_grab_human) and switch to CARRY.
+    - CARRY: Rise vertically while holding the human.  If the ship reaches the
+      top of the screen, both the ship and human are considered escaped (dead).
+
+    Ships also fire ClaudeBullets at the player on a level-scaled timer.
+    All speeds and shooting intervals scale with the level parameter.
+
+    Attributes:
+        SIZE:        Sprite size in pixels (class constant; also collision half-width).
+        STATE_HOVER: State constant string 'hover'.
+        STATE_DIVE:  State constant string 'dive'.
+        STATE_CARRY: State constant string 'carry'.
+        SHOOT_INTERVAL_BASE: Base seconds between shots at level 1.
+        world_x:       Horizontal world position.
+        y:             Screen Y position (centre of the sprite).
+        level:         Level number; scales speed, dive chance, shoot rate.
+        state:         Current state string (one of the STATE_* constants).
+        target_human:  Human being targeted in DIVE state (None otherwise).
+        carried_human: Human being carried in CARRY state (None otherwise).
+        vx_drift:      Horizontal drift velocity in HOVER state (px/s).
+        hover_phase:   Phase angle for the vertical bobbing sine in HOVER.
+        hover_base_y:  Centre Y for the bobbing motion in HOVER.
+        dead:          Set True to remove the ship next filter pass.
+        anim_frame:    0 or 1, toggled to select the thrust-on/off sprite.
+        anim_tick:     Accumulator controlling anim_frame toggle rate.
+        surfs:         Two pre-rendered sprite surfaces (engine off, engine on).
+    """
     SIZE        = 38
     STATE_HOVER = 'hover'
     STATE_DIVE  = 'dive'
@@ -683,6 +1168,14 @@ class ClaudeShip:
     SHOOT_INTERVAL_BASE = 3.5   # seconds between shots (base); decreases with level
 
     def __init__(self, world_x: float, y: float, level: int = 1):
+        """Spawn a Claude ship at (world_x, y) scaled to the given level.
+
+        Args:
+            world_x: Initial horizontal world position.
+            y:       Initial screen Y position (centre of sprite).
+            level:   Difficulty level (1+); controls speed, shoot rate, dive
+                     probability.
+        """
         self.world_x      = float(world_x)
         self.y            = float(y)
         self.level        = level
@@ -704,6 +1197,17 @@ class ClaudeShip:
         self._shoot_timer    = random.uniform(0, self._shoot_interval)
 
     def update(self, dt: float, humans: list, terrain: "Terrain"):
+        """Advance the ship's state machine, animation, and position.
+
+        Delegates to the appropriate private _update_* helper based on the
+        current state.  Wraps world_x to [0, WORLD_W) and clamps y above the
+        terrain after each state update.
+
+        Args:
+            dt:      Elapsed seconds since the last frame.
+            humans:  List of all Human objects (used in HOVER for targeting).
+            terrain: Terrain object for floor-clamping the ship's Y position.
+        """
         self.anim_tick += dt
         if self.anim_tick > 0.25:
             self.anim_tick = 0.0
@@ -737,6 +1241,13 @@ class ClaudeShip:
                             player.world_x, player.y)
 
     def _update_hover(self, dt: float, humans: list, terrain: "Terrain"):
+        """Handle HOVER state: drift, bob, and randomly begin an abduction dive.
+
+        Args:
+            dt:      Elapsed seconds.
+            humans:  List of Human objects to select a dive target from.
+            terrain: Terrain object for computing a safe hover altitude.
+        """
         self.hover_phase += dt * 1.8
         # keep hover base well above terrain at current position
         floor_y = terrain.height_at(self.world_x) - self.SIZE // 2 - 20
@@ -753,6 +1264,16 @@ class ClaudeShip:
             sfx.play('abduct')
 
     def _update_dive(self, dt: float, terrain: "Terrain"):
+        """Handle DIVE state: home in on target human and grab on arrival.
+
+        If the target disappears or dies mid-dive, the ship returns to HOVER.
+        Uses wrap-aware delta-X homing so the ship always takes the shortest
+        path around the world.
+
+        Args:
+            dt:      Elapsed seconds.
+            terrain: Terrain object used to detect the ground landing point.
+        """
         if self.target_human is None or self.target_human.dead:
             self.state = self.STATE_HOVER
             if self.target_human and not self.target_human.dead:
@@ -781,6 +1302,7 @@ class ClaudeShip:
             self._grab_human()
 
     def _grab_human(self):
+        """Transfer the targeted human to the carried slot and switch to CARRY state."""
         h = self.target_human
         h.carrier = self
         self.carried_human = h
@@ -788,6 +1310,16 @@ class ClaudeShip:
         self.target_human = None
 
     def _update_carry(self, dt: float, terrain: "Terrain"):
+        """Handle CARRY state: rise upward dragging the human; escape if off-screen.
+
+        Keeps the carried human's world_x and y locked to just below this ship.
+        When the ship exits the top of the screen, the carried human is marked
+        dead (escaped) and the ship itself is also marked dead.
+
+        Args:
+            dt:      Elapsed seconds.
+            terrain: Unused in this state; present for method-signature symmetry.
+        """
         self.y -= self._carry_speed * dt
         if self.carried_human:
             self.carried_human.world_x = self.world_x
@@ -802,6 +1334,13 @@ class ClaudeShip:
             self.dead = True
 
     def kill(self):
+        """Mark the ship dead and release any carried or targeted human.
+
+        If the ship was in CARRY state the released human enters a falling
+        state so the player has a chance to rescue it.  If the ship was in
+        DIVE state the targeted human's abducted flag is cleared so other
+        ships can target it.
+        """
         if self.carried_human:
             h = self.carried_human
             h.abducted = False
@@ -815,6 +1354,12 @@ class ClaudeShip:
         self.dead = True
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the ship sprite and, in CARRY state, a tether line to the human.
+
+        Args:
+            surf:     Destination surface.
+            camera_x: World X of the left screen edge.
+        """
         sx = (self.world_x - camera_x) % WORLD_W
         if sx < -self.SIZE or sx > W + self.SIZE:
             return
@@ -835,12 +1380,20 @@ class ClaudeBomb:
     SIZE       = 10    # collision radius
 
     def __init__(self, world_x: float, y: float, target_human=None):
+        """Spawn a falling bomb at (world_x, y), optionally tracking a human.
+
+        Args:
+            world_x:      Horizontal world position at bomb release.
+            y:            Vertical screen Y position at bomb release.
+            target_human: Optional Human the bomb drifts toward; None for
+                          a purely vertical drop.
+        """
         self.world_x      = float(world_x)
         self.y            = float(y)
         self.target_human = target_human   # drifts slightly toward target X
         self.dead         = False
         self.exploded     = False
-        self.trail: list  = []  # (x, y) screen positions for smoke trail
+        self.trail: list  = []  # (x, y, alpha) tuples for the smoke trail
         self.trail_timer  = 0.0
 
     def update(self, dt: float, terrain: "Terrain", humans: list,
@@ -890,6 +1443,13 @@ class ClaudeBomb:
         return False
 
     def _explode(self, particles: list, camera_x: float):
+        """Trigger an explosion: mark dead, play sound, and spawn particles.
+
+        Args:
+            particles: Shared particle list; explosion fragments are appended here.
+            camera_x:  Current camera X used to convert world position to screen
+                       coordinates for spawning particles.
+        """
         self.dead     = True
         self.exploded = True
         sfx.play('bomb_explode')
@@ -900,6 +1460,15 @@ class ClaudeBomb:
             particles.append(Particle(sx, self.y, YELLOW))
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the falling bomb with its smoke trail and pulsing fuse tip.
+
+        The smoke trail is drawn unconditionally (it uses screen-space positions
+        cached during update).  The bomb body is culled if off screen.
+
+        Args:
+            surf:     Destination surface.
+            camera_x: World X of the left screen edge.
+        """
         # smoke trail
         for tx, ty, alpha in self.trail:
             a = int(alpha * 140)
@@ -927,6 +1496,16 @@ class ClaudeBomber:
     SCORE_VALUE       = 500
 
     def __init__(self, world_x: float, direction: int, level: int = 1):
+        """Spawn a bomber entering the world from the given direction.
+
+        The bomber flies at a fixed altitude in the upper third of the play area
+        and drops bombs at random intervals, retiring after two full world laps.
+
+        Args:
+            world_x:   Starting horizontal world position (typically off-screen).
+            direction: +1 to fly right, -1 to fly left.
+            level:     Difficulty level; increases speed.
+        """
         self.world_x    = float(world_x)
         self.y          = float(random.uniform(PLAY_Y + 60, PLAY_Y + (GROUND_Y - PLAY_Y) * 0.35))
         self.direction  = direction   # +1 right, -1 left
@@ -970,12 +1549,24 @@ class ClaudeBomber:
         return None
 
     def _drop_bomb(self, humans: list) -> "ClaudeBomb":
+        """Create and return a ClaudeBomb aimed at the nearest living human.
+
+        Picks the human closest to the bomber by wrap-aware world distance.
+        If no humans remain, drops a bomb with no target (purely vertical fall).
+
+        Args:
+            humans: List of all Human objects in the level.
+
+        Returns:
+            A new ClaudeBomb instance starting just below the bomb bay.
+        """
         # target the nearest human below
         available = [h for h in humans if not h.dead and not h.abducted]
         target = None
         if available:
             # pick closest by world-wrap distance
             def wrap_dist(h):
+                """Return the shortest wrap-aware world distance from the bomber to human h."""
                 dx = abs(h.world_x - self.world_x)
                 return min(dx, WORLD_W - dx)
             target = min(available, key=wrap_dist)
@@ -983,6 +1574,12 @@ class ClaudeBomber:
         return ClaudeBomb(self.world_x, self.y + self.HEIGHT // 2 + 2, target)
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the bomber sprite, flipped horizontally when flying left.
+
+        Args:
+            surf:     Destination surface.
+            camera_x: World X of the left screen edge.
+        """
         sx = (self.world_x - camera_x) % WORLD_W
         if sx < -self.WIDTH or sx > W + self.WIDTH:
             return
@@ -993,6 +1590,39 @@ class ClaudeBomber:
 
 
 class Player:
+    """The player-controlled ship with 4-directional inertial movement.
+
+    The ship accelerates toward the held direction key and decelerates via drag
+    when no key is pressed.  Horizontal movement wraps the world; vertical
+    movement is clamped between the top of the play area and the terrain surface.
+
+    The player has lives (counted down on hits) and a brief invincibility window
+    after each hit to prevent instant double-kills.  Zappers are a per-life
+    limited-use screen-clear weapon; they are replenished each time the player
+    loses a life.
+
+    Attributes:
+        SIZE:          Sprite half-width/height for collision purposes (class constant).
+        SPEED_H:       Maximum horizontal speed in px/s.
+        SPEED_V:       Maximum vertical speed in px/s.
+        ACCEL:         Acceleration / deceleration magnitude in px/s².
+        SHOT_COOLDOWN: Minimum seconds between consecutive shots.
+        MAX_ZAPPERS:   Number of Super Zappers available per life.
+        world_x:       Horizontal world position (wraps).
+        y:             Screen Y of the ship centre.
+        vx:            Current horizontal velocity (px/s).
+        vy:            Current vertical velocity (px/s).
+        facing:        +1 (right) or -1 (left); determines bullet direction and
+                       sprite flip.
+        lives:         Remaining lives; game ends when this reaches 0.
+        zappers:       Remaining Super Zappers this life.
+        cooldown:      Seconds until the next shot is allowed.
+        invincible:    Seconds of invincibility remaining after a hit.
+        dead:          Unused in normal play; kept for consistency.
+        anim_frame:    0 or 1, toggled to animate the engine thrust.
+        anim_tick:     Accumulator for anim_frame toggle timing.
+        surfs:         Two pre-rendered ship surfaces (engine off, engine on).
+    """
     SIZE         = 32
     SPEED_H      = 320
     SPEED_V      = 240
@@ -1001,6 +1631,7 @@ class Player:
     MAX_ZAPPERS  = 3
 
     def __init__(self):
+        """Initialise the player at the horizontal centre of the world, mid-screen."""
         self.world_x   = float(WORLD_W // 2)
         self.y         = float(H // 2)
         self.vx        = 0.0
@@ -1016,6 +1647,17 @@ class Player:
         self.surfs     = [make_player_surf(f) for f in (0, 1)]
 
     def update(self, dt: float, keys, terrain: Terrain):
+        """Process input, apply inertia, clamp to play area, and tick timers.
+
+        Horizontal velocity accelerates up to SPEED_H while a key is held and
+        decelerates at half-ACCEL when released.  Vertical motion mirrors this.
+        World X wraps; Y is clamped between PLAY_Y+20 and the terrain surface.
+
+        Args:
+            dt:      Elapsed seconds since the last frame.
+            keys:    pygame key state dict (from pygame.key.get_pressed()).
+            terrain: Terrain object queried for the floor Y at the player's world X.
+        """
         # horizontal
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
             self.vx = max(-self.SPEED_H, self.vx - self.ACCEL * dt)
@@ -1052,6 +1694,14 @@ class Player:
             self.anim_frame ^= 1
 
     def shoot(self) -> "Bullet | None":
+        """Attempt to fire a bullet; returns None if the cooldown has not expired.
+
+        Spawns the bullet just ahead of the ship's nose in the facing direction
+        and resets the shot cooldown timer.
+
+        Returns:
+            A new Bullet instance, or None if the player cannot fire yet.
+        """
         if self.cooldown > 0:
             return None
         self.cooldown = self.SHOT_COOLDOWN
@@ -1059,6 +1709,15 @@ class Player:
         return Bullet(bx, self.y, self.facing)
 
     def draw(self, surf: pygame.Surface, camera_x: float):
+        """Draw the player ship, flipping horizontally when facing left.
+
+        The ship blinks (skips every other draw) during invincibility frames to
+        provide visual feedback that the player was recently hit.
+
+        Args:
+            surf:     Destination surface.
+            camera_x: World X of the left screen edge.
+        """
         if self.invincible > 0 and int(self.invincible * 10) % 2:
             return
         sx = (self.world_x - camera_x) % WORLD_W
@@ -1069,6 +1728,13 @@ class Player:
 
     @property
     def rect_world(self) -> pygame.Rect:
+        """Return an axis-aligned bounding rectangle in world coordinates.
+
+        Used for wrap-aware collision checks against humans.
+
+        Returns:
+            pygame.Rect centred on (world_x, y) with side length SIZE.
+        """
         return pygame.Rect(int(self.world_x) - self.SIZE // 2,
                            int(self.y) - self.SIZE // 2,
                            self.SIZE, self.SIZE)
@@ -1080,6 +1746,16 @@ STARS = [(random.randint(0, W), random.randint(PLAY_Y, H - 80),
 
 
 def draw_stars(surf: pygame.Surface, camera_x: float):
+    """Draw the static star field with slow parallax scrolling.
+
+    Stars are stored in screen space but offset by 60% of camera_x each frame
+    to produce a parallax depth effect.  Brightness (br in 1–3) scales the
+    star colour.
+
+    Args:
+        surf:     Destination surface.
+        camera_x: Current camera X; used for the parallax offset.
+    """
     for wx, sy, br in STARS:
         sx = int((wx - camera_x * 0.6) % W)
         c  = (min(255, STAR_C[0] * br // 3),
@@ -1093,6 +1769,22 @@ def draw_radar(surf: pygame.Surface, camera_x: float,
                terrain: Terrain, player: Player,
                enemies: list, humans: list,
                bombers: list | None = None):
+    """Draw the radar mini-map strip at the top of the screen.
+
+    The strip shows the pre-baked terrain silhouette, a camera viewport
+    rectangle, coloured dots for enemies (orange), humans (green), bombers
+    (red, larger), and the player (white).  All world X positions are scaled
+    linearly to the strip width.
+
+    Args:
+        surf:     Destination surface (the game surface).
+        camera_x: Current world X of the left screen edge.
+        terrain:  Terrain object whose pre-baked radar surface is blitted first.
+        player:   Player object whose world_x is plotted as a white dot.
+        enemies:  List of ClaudeShip objects to plot as orange dots.
+        humans:   List of Human objects to plot as green dots (dead ones skipped).
+        bombers:  Optional list of ClaudeBomber objects to plot as red dots.
+    """
     r = pygame.Rect(0, 0, W, RADAR_H)
     pygame.draw.rect(surf, RADAR_BG, r)
     terrain.draw_radar(surf, r)
@@ -1127,6 +1819,20 @@ def draw_radar(surf: pygame.Surface, camera_x: float,
 # ── HUD ────────────────────────────────────────────────────────────────────────
 def draw_hud(surf: pygame.Surface, score: int, lives: int, zappers: int,
              level: int, hi: int):
+    """Draw the HUD bar (score, hi-score, level, lives, and zapper icons).
+
+    The HUD occupies the HUD_H-pixel-tall strip immediately below the radar.
+    The top row shows score / hi-score / level; the bottom row shows life icons
+    on the left and zapper charge circles on the right.
+
+    Args:
+        surf:    Destination surface.
+        score:   Current player score.
+        lives:   Current remaining lives (controls icon count and tint).
+        zappers: Current remaining Super Zappers.
+        level:   Current level number displayed in the top-right.
+        hi:      Current high score (may be updated mid-game).
+    """
     bar_y = RADAR_H
     pygame.draw.rect(surf, (12, 12, 38), (0, bar_y, W, HUD_H))
     pygame.draw.line(surf, (30, 30, 60), (0, bar_y + HUD_H - 1), (W, bar_y + HUD_H - 1), 1)
@@ -1178,6 +1884,19 @@ def draw_hud(surf: pygame.Surface, score: int, lives: int, zappers: int,
 # ── screens ────────────────────────────────────────────────────────────────────
 def draw_scores_table(surf: pygame.Surface, cx: int, y: int,
                       count: int = 10, highlight: int = -1):
+    """Draw a formatted high-score table centred at x=cx, starting at y.
+
+    Each row shows rank, initials, and score.  The row matching highlight (1-based)
+    is drawn in yellow; ranks 1-3 are drawn in white; remaining rows in grey.
+    If the score list is empty, a placeholder message is shown instead.
+
+    Args:
+        surf:      Destination surface.
+        cx:        Horizontal centre position for the table.
+        y:         Vertical start position for the header row.
+        count:     Maximum number of entries to display (default 10).
+        highlight: 1-based rank to highlight in yellow, or -1 for none.
+    """
     hdr = font_small.render("  #   NAME    SCORE", True, CLAUDE_O)
     surf.blit(hdr, (cx - hdr.get_width() // 2, y))
     pygame.draw.line(surf, CLAUDE_D, (cx - 120, y + 22), (cx + 120, y + 22), 1)
@@ -1194,6 +1913,20 @@ def draw_scores_table(surf: pygame.Surface, cx: int, y: int,
 
 
 def enter_initials_screen(score: int, rank: int) -> str:
+    """Run the arcade-style 3-letter initial entry screen.
+
+    Displays three letter slots that the player cycles through using the arrow
+    keys.  Pressing SPACE/RIGHT advances to the next slot; ENTER confirms.
+    The top-5 high-score table is shown below the input area for context.
+
+    Args:
+        score: The score just achieved (displayed above the input).
+        rank:  The 1-based rank the score would achieve (displayed alongside).
+
+    Returns:
+        A 3-character uppercase string of the entered initials (e.g. 'ABC').
+        Returns 'AAA' if ESC is pressed.
+    """
     letters = ['A', 'A', 'A']
     pos     = 0
     t       = 0.0
@@ -1318,6 +2051,12 @@ def draw_title_scores(surf: pygame.Surface, x: int, y: int):
 
 
 def title_screen():
+    """Display the animated title/main-menu screen and block until ENTER is pressed.
+
+    Shows the game title, an animated enemy ship and drifting bomber, the
+    control reference, scoring legend, and high-score table.  The M key toggles
+    sound; ESC quits.  Returns normally when the player presses ENTER or SPACE.
+    """
     ship_surf  = make_claude_ship_surf(64, 0)
     ship_surf2 = make_claude_ship_surf(64, 1)
     bomber_s   = make_claude_bomber_surf(0)
@@ -1414,6 +2153,18 @@ def title_screen():
 
 def game_over_screen(score: int, hi: int, won: bool = False,
                      humans_lost: bool = False):
+    """Display the end-of-run screen with the player's score and the leaderboard.
+
+    Shows a different headline depending on the run outcome: win, humans-lost,
+    or standard game over.  Blocks until the player presses ENTER, SPACE, R, or
+    ESC.  The full 10-entry high-score table is displayed below the score.
+
+    Args:
+        score:       The final score achieved this run.
+        hi:          Current highest score (used as the displayed hi-score).
+        won:         True if the player cleared all 6 levels.
+        humans_lost: True if the run ended because all humans were abducted.
+    """
     t = 0.0
     while True:
         dt = clock.tick(FPS) / 1000
@@ -1456,6 +2207,24 @@ def game_over_screen(score: int, hi: int, won: bool = False,
 
 # ── level parameters ───────────────────────────────────────────────────────────
 def level_params(level: int) -> dict:
+    """Return a dict of gameplay parameters scaled to the given level number.
+
+    All numeric fields grow with level so later levels spawn more enemies
+    faster, require more kills to clear, and award higher scores per kill.
+
+    Args:
+        level: 1-based level number.
+
+    Returns:
+        Dict with keys:
+          'initial_enemies'   — enemy count spawned at level start.
+          'max_enemies'       — maximum simultaneous enemies on screen.
+          'spawn_interval'    — seconds between automatic enemy spawns.
+          'kills_for_clear'   — total kills needed to complete the level.
+          'score_kill_hover'  — points for destroying a hovering enemy.
+          'score_kill_dive'   — points for destroying a diving enemy.
+          'score_kill_carry'  — points for destroying an enemy carrying a human.
+    """
     return {
         'initial_enemies': min(16, 4 + level * 2),
         'max_enemies':     min(20, 6 + level * 3),
@@ -1906,6 +2675,13 @@ def play_level(level: int, score: int, lives: int, hi: int):
 
 # ── entry point ────────────────────────────────────────────────────────────────
 def main():
+    """Top-level game loop: title → level progression → game over → initials → repeat.
+
+    Manages the outer run cycle.  After each play run, checks whether the score
+    qualifies for the high-score table and, if so, shows the initial-entry screen
+    before proceeding to the game-over summary.  Loops back to the title screen
+    after the game-over screen is dismissed.
+    """
     while True:
         title_screen()
 
