@@ -63,7 +63,7 @@ pygame.init()
 W, H     = 900, 700
 WORLD_W  = 4500          # 5× screen width; world wraps
 RADAR_H  = 44            # mini-map strip height
-HUD_H    = 40            # score/lives bar below radar
+HUD_H    = 52            # score/lives bar below radar
 PLAY_Y   = RADAR_H + HUD_H   # top of actual play area (84px)
 GROUND_Y = H - 60        # terrain baseline
 FPS      = 60
@@ -1130,19 +1130,49 @@ def draw_hud(surf: pygame.Surface, score: int, lives: int, zappers: int,
     bar_y = RADAR_H
     pygame.draw.rect(surf, (12, 12, 38), (0, bar_y, W, HUD_H))
     pygame.draw.line(surf, (30, 30, 60), (0, bar_y + HUD_H - 1), (W, bar_y + HUD_H - 1), 1)
-    surf.blit(font_med.render(f"SCORE {score:06d}", True, WHITE), (10, bar_y + 7))
-    surf.blit(font_med.render(f"HI {hi:06d}", True, YELLOW), (W // 2 - 65, bar_y + 7))
-    surf.blit(font_med.render(f"LV {level}", True, MX_GRN), (W - 130, bar_y + 7))
-    # lives as tiny ship icons
-    tiny_s = make_player_surf(0)
-    for i in range(max(0, lives - 1)):
-        surf.blit(tiny_s, (10 + i * 34, bar_y + HUD_H + 4))
-    # zapper icons (Z)
-    for i in range(zappers):
-        zx = W - 30 - i * 22
-        pygame.draw.circle(surf, ZAP_C, (zx, bar_y + HUD_H + 12), 8, 2)
+
+    # ── top row: score / hi / level ──
+    surf.blit(font_med.render(f"SCORE {score:07d}", True, WHITE), (10, bar_y + 3))
+    hi_s = font_med.render(f"HI {hi:07d}", True, YELLOW)
+    surf.blit(hi_s, (W // 2 - hi_s.get_width() // 2, bar_y + 3))
+    lv_s = font_med.render(f"LV {level}", True, MX_GRN)
+    surf.blit(lv_s, (W - lv_s.get_width() - 10, bar_y + 3))
+
+    # divider between rows
+    pygame.draw.line(surf, (22, 22, 52), (0, bar_y + 30), (W, bar_y + 30), 1)
+
+    # ── bottom row: lives (left) | zappers (right) ──
+    row2_y = bar_y + 33
+
+    # "LIVES" label
+    ll = font_small.render("LIVES", True, (140, 140, 180))
+    surf.blit(ll, (10, row2_y))
+    icon_x = 10 + ll.get_width() + 6
+
+    # one ship icon per life remaining; dim the last one if only 1 left
+    tiny_s = pygame.transform.scale(make_player_surf(0), (22, 13))
+    for i in range(max(0, lives)):
+        col_tint = (255, 80, 80) if lives == 1 else WHITE
+        icon = tiny_s.copy()
+        icon.fill((*col_tint, 180), special_flags=pygame.BLEND_RGBA_MULT)
+        surf.blit(icon, (icon_x + i * 26, row2_y + 1))
+
+    # numeric count next to icons
+    cnt_s = font_small.render(f"×{lives}", True, (255, 80, 80) if lives == 1 else WHITE)
+    surf.blit(cnt_s, (icon_x + lives * 26 + 4, row2_y))
+
+    # "ZAP" label + icons, right-aligned
+    zl = font_small.render("ZAP", True, (140, 140, 180))
+    # calculate total width of zap section to right-align it
+    zap_icon_w = 18
+    zap_total  = zl.get_width() + 6 + zappers * (zap_icon_w + 2)
+    zl_x       = W - zap_total - 10
+    surf.blit(zl, (zl_x, row2_y))
+    for i in range(max(0, zappers)):
+        zx = zl_x + zl.get_width() + 6 + i * (zap_icon_w + 2) + zap_icon_w // 2
+        pygame.draw.circle(surf, ZAP_C, (zx, row2_y + 8), 7, 2)
         zt = font_small.render("Z", True, ZAP_C)
-        surf.blit(zt, (zx - zt.get_width() // 2, bar_y + HUD_H + 4))
+        surf.blit(zt, (zx - zt.get_width() // 2, row2_y))
 
 
 # ── screens ────────────────────────────────────────────────────────────────────
