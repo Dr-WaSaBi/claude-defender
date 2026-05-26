@@ -1220,9 +1220,54 @@ def enter_initials_screen(score: int, rank: int) -> str:
         pygame.display.flip()
 
 
+def draw_title_scores(surf: pygame.Surface, x: int, y: int):
+    """Arcade-style high score board for the title screen."""
+    # panel background
+    panel = pygame.Rect(x - 10, y - 10, 340, 310)
+    pygame.draw.rect(surf, (12, 12, 38), panel, border_radius=8)
+    pygame.draw.rect(surf, CLAUDE_D, panel, width=2, border_radius=8)
+
+    hdr = font_med.render("HIGH  SCORES", True, CLAUDE_O)
+    surf.blit(hdr, (x + panel.width // 2 - hdr.get_width() // 2 - 10, y))
+    pygame.draw.line(surf, CLAUDE_D, (x - 8, y + 34), (x + panel.width - 12, y + 34), 1)
+    y += 42
+
+    if not hs.scores:
+        empty = font_small.render("— no scores yet —", True, GRAY)
+        surf.blit(empty, (x + panel.width // 2 - empty.get_width() // 2 - 10, y + 80))
+        return
+
+    for i, entry in enumerate(hs.scores[:8]):
+        rank = i + 1
+        # rank medal colors
+        if rank == 1:
+            col = YELLOW
+        elif rank == 2:
+            col = (200, 200, 200)
+        elif rank == 3:
+            col = (200, 130, 60)
+        else:
+            col = (160, 160, 180)
+
+        rank_s = font_small.render(f"{rank:>2}.", True, col)
+        name_s = font_small.render(entry['name'], True, WHITE)
+        score_s= font_small.render(f"{entry['score']:>07d}", True, col)
+
+        row_y = y + i * 28
+        surf.blit(rank_s,  (x,          row_y))
+        surf.blit(name_s,  (x + 36,     row_y))
+        surf.blit(score_s, (x + 210,    row_y))
+
+        # subtle row separator
+        if i < len(hs.scores[:8]) - 1:
+            pygame.draw.line(surf, (25, 25, 50),
+                             (x - 6, row_y + 22), (x + panel.width - 14, row_y + 22), 1)
+
+
 def title_screen():
-    ship_surf = make_claude_ship_surf(64, 0)
-    ship_surf2= make_claude_ship_surf(64, 1)
+    ship_surf  = make_claude_ship_surf(64, 0)
+    ship_surf2 = make_claude_ship_surf(64, 1)
+    bomber_s   = make_claude_bomber_surf(0)
     t = 0.0
     while True:
         dt = clock.tick(FPS) / 1000
@@ -1239,33 +1284,74 @@ def title_screen():
         screen.fill(SKY)
         draw_stars(screen, t * 20)
 
+        # ── title banner ──
         title = font_big.render("CLAUDE  DEFENDER", True, CLAUDE_O)
-        screen.blit(title, (W // 2 - title.get_width() // 2, 100))
-
+        screen.blit(title, (W // 2 - title.get_width() // 2, 28))
         sub = font_med.render("Protect humanity from the rogue AI fleet!", True, MX_GRN)
-        screen.blit(sub, (W // 2 - sub.get_width() // 2, 166))
+        screen.blit(sub, (W // 2 - sub.get_width() // 2, 88))
 
-        bob  = int(math.sin(t * 2.5) * 8)
+        # divider
+        pygame.draw.line(screen, CLAUDE_D, (40, 118), (W - 40, 118), 1)
+
+        # ── left column: animated ships + controls ──
+        col_left = 60
+
+        bob   = int(math.sin(t * 2.5) * 8)
         frame = int(t * 4) % 2
-        ss = ship_surf if frame == 0 else ship_surf2
-        screen.blit(ss, (W // 2 - 32, 210 + bob))
+        ss    = ship_surf if frame == 0 else ship_surf2
+        screen.blit(ss, (col_left + 20, 138 + bob))
+
+        # bomber drifting across left column
+        bx = int((t * 50) % 320) + col_left - 32
+        screen.blit(bomber_s, (bx, 148))
+
+        ctrl_hdr = font_med.render("CONTROLS", True, WHITE)
+        screen.blit(ctrl_hdr, (col_left, 230))
+        pygame.draw.line(screen, GRAY, (col_left, 258), (col_left + 300, 258), 1)
 
         inst = [
-            "← → / A D    Fly left / right",
-            "↑ ↓ / W S    Fly up / down",
-            "SPACE         Fire",
-            "Z or X        Super Zapper (3 per life)",
-            "ESC           Quit",
+            ("← → / A D", "Fly left / right"),
+            ("↑ ↓ / W S",  "Fly up / down"),
+            ("SPACE",       "Fire (max 4 bullets)"),
+            ("Z  or  X",    "Super Zapper  ×3"),
+            ("ESC",         "Quit"),
         ]
-        for i, line in enumerate(inst):
-            s = font_small.render(line, True, WHITE)
-            screen.blit(s, (W // 2 - s.get_width() // 2, 310 + i * 24))
+        for i, (key, desc) in enumerate(inst):
+            ky = font_small.render(key,  True, YELLOW)
+            ds = font_small.render(desc, True, WHITE)
+            row_y = 268 + i * 26
+            screen.blit(ky, (col_left,       row_y))
+            screen.blit(ds, (col_left + 130, row_y))
 
-        blink = font_med.render("PRESS ENTER TO PLAY",
+        # scoring legend
+        screen.blit(font_small.render("SCORING", True, CLAUDE_O), (col_left, 410))
+        pygame.draw.line(screen, CLAUDE_D, (col_left, 428), (col_left + 300, 428), 1)
+        scoring = [
+            ("Fighter (hover)",  "100× LV"),
+            ("Fighter (carry)",  "200× LV"),
+            ("Bomber",           "500 pts"),
+            ("Shoot bomb",       "200 pts"),
+            ("Rescue human",     "500 pts"),
+        ]
+        for i, (label, pts) in enumerate(scoring):
+            ls = font_small.render(label, True, WHITE)
+            ps = font_small.render(pts,   True, YELLOW)
+            screen.blit(ls, (col_left,       432 + i * 22))
+            screen.blit(ps, (col_left + 180, 432 + i * 22))
+
+        # ── right column: high scores ──
+        draw_title_scores(screen, 530, 138)
+
+        # ── blinking start prompt ──
+        pygame.draw.line(screen, CLAUDE_D, (40, 545), (W - 40, 545), 1)
+        blink = font_med.render("PRESS  ENTER  TO  PLAY",
                                  True, YELLOW if int(t * 2) % 2 == 0 else (180, 160, 0))
-        screen.blit(blink, (W // 2 - blink.get_width() // 2, 450))
+        screen.blit(blink, (W // 2 - blink.get_width() // 2, 558))
 
-        draw_scores_table(screen, W // 2, 500, count=5)
+        # small version tag
+        ver = font_small.render("v1.0  |  pygame + numpy  |  no assets", True, (50, 50, 70))
+        screen.blit(ver, (W // 2 - ver.get_width() // 2, 610))
+
         pygame.display.flip()
 
 
