@@ -239,8 +239,12 @@ class SoundEngine:
         return self._bake((noise * 0.6 + tone * 0.4) * env, 0.5)
 
     def play(self, name: str):
-        getattr(self, name).play()
+        if _sound_on[0]:
+            getattr(self, name).play()
 
+
+# mutable flag so any scope can toggle without a global declaration
+_sound_on = [True]
 
 sfx = SoundEngine()
 
@@ -1220,6 +1224,25 @@ def enter_initials_screen(score: int, rank: int) -> str:
         pygame.display.flip()
 
 
+def draw_sound_toggle(surf: pygame.Surface):
+    """Draw the sound on/off toggle button in the bottom-right of the title screen."""
+    on   = _sound_on[0]
+    label= "M  SOUND: ON " if on else "M  SOUND: OFF"
+    fg   = MX_GRN if on else (140, 50, 50)
+    bg   = (10, 35, 15) if on else (35, 10, 10)
+    border = (30, 100, 40) if on else (100, 30, 30)
+
+    txt  = font_small.render(label, True, fg)
+    pad  = 8
+    rect = pygame.Rect(W - txt.get_width() - pad * 2 - 12,
+                       H - txt.get_height() - pad * 2 - 8,
+                       txt.get_width() + pad * 2,
+                       txt.get_height() + pad * 2)
+    pygame.draw.rect(surf, bg, rect, border_radius=6)
+    pygame.draw.rect(surf, border, rect, width=1, border_radius=6)
+    surf.blit(txt, (rect.x + pad, rect.y + pad))
+
+
 def draw_title_scores(surf: pygame.Surface, x: int, y: int):
     """Arcade-style high score board for the title screen."""
     # panel background
@@ -1280,6 +1303,8 @@ def title_screen():
                     return
                 if e.key == pygame.K_ESCAPE:
                     pygame.quit(); sys.exit()
+                if e.key == pygame.K_m:
+                    _sound_on[0] = not _sound_on[0]
 
         screen.fill(SKY)
         draw_stars(screen, t * 20)
@@ -1314,6 +1339,7 @@ def title_screen():
             ("↑ ↓ / W S",  "Fly up / down"),
             ("SPACE",       "Fire (max 4 bullets)"),
             ("Z  or  X",    "Super Zapper  ×3"),
+            ("M",           "Toggle sound on / off"),
             ("ESC",         "Quit"),
         ]
         for i, (key, desc) in enumerate(inst):
@@ -1352,6 +1378,7 @@ def title_screen():
         ver = font_small.render("v1.0  |  pygame + numpy  |  no assets", True, (50, 50, 70))
         screen.blit(ver, (W // 2 - ver.get_width() // 2, 610))
 
+        draw_sound_toggle(screen)
         pygame.display.flip()
 
 
@@ -1476,6 +1503,8 @@ def play_level(level: int, score: int, lives: int, hi: int):
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
                     return score, player.lives, hi, 'quit'
+                if e.key == pygame.K_m:
+                    _sound_on[0] = not _sound_on[0]
                 if e.key == pygame.K_SPACE:
                     if len(bullets) < MAX_BULLETS:
                         b = player.shoot()
